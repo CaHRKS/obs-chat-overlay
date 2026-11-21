@@ -427,12 +427,18 @@ std::string build_page(const std::string &html, const std::string &css, const st
 		"(e.lineno||0)+(e.error&&e.error.stack?' stack: '+String(e.error.stack).slice(0,600):''));});"
 		"window.addEventListener('unhandledrejection',function(e){send('rejection: '+((e.reason&&"
 		"e.reason.message)||e.reason));});"
-		// Log every network request the widget makes: this shows whether it uses
-		// our emotes payload or fetches its own data from the StreamElements API.
-		"try{var of=window.fetch;if(of){window.fetch=function(u,o){try{send('fetch: '+("
-		"typeof u==='string'?u:(u&&u.url)||''));}catch(e){}return of.call(this,u,o);};}}catch(e){}"
-		"try{var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){"
-		"try{send('xhr: '+m+' '+u);}catch(e){}return xo.apply(this,arguments);};}catch(e){}"
+		// Log the network requests the widget makes, but never the log endpoint
+		// itself: send() uses fetch('/log'), so intercepting it would recurse
+		// (each logged line produced another fetch and flooded the connection).
+		"try{var of=window.fetch;if(of){var nf=0;window.fetch=function(u,o){var url=("
+		"typeof u==='string')?u:((u&&u.url)||'');"
+		"if(url.indexOf('/log')>=0||url.indexOf('/events')>=0)return of.call(this,u,o);"
+		"try{if(nf<40){nf++;send('fetch: '+url);}}catch(e){}return of.call(this,u,o);};}}catch(e){}"
+		"try{var xo=XMLHttpRequest.prototype.open;var nx=0;"
+		"XMLHttpRequest.prototype.open=function(m,u){var url=String(u||'');"
+		"if(url.indexOf('/log')<0&&url.indexOf('/events')<0){"
+		"try{if(nx<40){nx++;send('xhr: '+m+' '+url);}}catch(e){}}"
+		"return xo.apply(this,arguments);};}catch(e){}"
 		"})();";
 	page += "</script><script>";
 	// Minimal StreamElements runtime stubs so widgets do not throw on load.
@@ -666,15 +672,17 @@ void WidgetHost::set_overrides(const std::map<std::string, std::string> &overrid
 	if (!source_)
 		return;
 
-	// Patch the colours through the browser source's CSS property instead of
-	// rebuilding the page: reloading (or re-creating) the browser on every field
-	// edit can crash CEF.
+	// Field edits rebuild the page and navigate to a new URL. The browser source
+	// itself is kept alive (no destroy/create), which is what used to crash CEF.
 	const std::string fields = read_first(dir_, {"fields.txt", "fields.json"});
 	const std::string data = read_first(dir_, {"data.txt", "data.json"});
 	const FieldValues resolved =
 		collect_fields(fields, data.empty() ? "{}" : data, overrides_);
+	// Rebuild the page and navigate to a new URL: this guarantees the edited
+	// colours are visible (obs-browser may only apply the "css" property on
+	// load). A navigation is safe — the browser source itself is not re-created.
 	css_ = build_css_override(resolved);
-	apply_size();
+	rebuild(nullptr);
 	blog(LOG_INFO, "[chat-overlay] widget fields updated (%zu overrides)", overrides_.size());
 }
 

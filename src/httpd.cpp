@@ -307,6 +307,8 @@ void HttpServer::handle_connection(unsigned long long handle)
 				}
 				decoded.push_back(message[i] == '+' ? ' ' : message[i]);
 			}
+			if (decoded.size() > 800)
+				decoded.resize(800);
 			std::function<void(const std::string &)> logger;
 			{
 				std::lock_guard<std::mutex> lock(mutex_);
