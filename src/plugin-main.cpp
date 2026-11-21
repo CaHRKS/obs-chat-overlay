@@ -10,8 +10,10 @@
 #include "widget.hpp"
 
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -328,6 +330,53 @@ void apply_pending_theme(ChatOverlay *ctx, obs_data_t *settings, Config &cfg)
 	     cfg.font_face.c_str(), (int)std::lround(cfg.font_size));
 }
 
+// Field defaults are only *defaults*: the widget keeps using the values from
+// data.txt until the user actually edits a control in the dialog.
+void ensure_widget_field_defaults(obs_data_t *settings, const std::string &dir)
+{
+	for (const WidgetFieldInfo &field : widget_fields(dir)) {
+		const std::string key = "wf_" + field.name;
+		if (obs_data_has_user_value(settings, key.c_str()))
+			continue;
+
+		if (field.type == "colorpicker") {
+			uint32_t color = 0xFFFFFFFFu;
+			uint32_t parsed = 0;
+			if (parse_css_color(field.value, parsed))
+				color = parsed;
+			obs_data_set_default_int(settings, key.c_str(), (long long)color);
+		} else if (field.type == "checkbox") {
+			obs_data_set_default_bool(settings, key.c_str(), field.value == "true");
+		} else if (field.type == "number") {
+			obs_data_set_default_int(settings, key.c_str(), std::atoll(field.value.c_str()));
+		} else {
+			obs_data_set_default_string(settings, key.c_str(), field.value.c_str());
+		}
+	}
+}
+
+std::map<std::string, std::string> widget_overrides(obs_data_t *settings, const std::string &dir)
+{
+	std::map<std::string, std::string> result;
+	for (const WidgetFieldInfo &field : widget_fields(dir)) {
+		const std::string key = "wf_" + field.name;
+		if (!obs_data_has_user_value(settings, key.c_str()))
+			continue;
+
+		if (field.type == "colorpicker") {
+			result[field.name] =
+				css_color_from_obs((uint32_t)obs_data_get_int(settings, key.c_str()));
+		} else if (field.type == "checkbox") {
+			result[field.name] = obs_data_get_bool(settings, key.c_str()) ? "true" : "false";
+		} else if (field.type == "number") {
+			result[field.name] = std::to_string(obs_data_get_int(settings, key.c_str()));
+		} else {
+			result[field.name] = obs_data_get_string(settings, key.c_str());
+		}
+	}
+	return result;
+}
+
 void *chat_overlay_create(obs_data_t *settings, obs_source_t *source)
 {
 	auto *ctx = new ChatOverlay();
@@ -369,6 +418,11 @@ void chat_overlay_update(void *data, obs_data_t *settings)
 		return;
 
 	Config cfg = config_from_settings(settings);
+	// Fill dialog defaults for the widget's editable fields, then collect only
+	// the values the user actually changed.
+	ensure_widget_field_defaults(settings, cfg.widget_dir);
+	const std::map<std::string, std::string> overrides =
+		widget_overrides(settings, cfg.widget_dir);
 	apply_pending_theme(ctx, settings, cfg);
 
 	std::unique_ptr<TwitchWorker> previous_worker;
@@ -452,7 +506,8 @@ void chat_overlay_update(void *data, obs_data_t *settings)
 				std::string error;
 				auto host = std::make_unique<WidgetHost>();
 				if (host->start(ctx->source, cfg.widget_dir, ctx->emotes.get(),
-						ctx->images.get(), cfg.width, cfg.height, &error)) {
+						ctx->images.get(), overrides, cfg.width, cfg.height,
+						&error)) {
 					ctx->widget = std::move(host);
 					blog(LOG_INFO, "[chat-overlay] widget mode enabled: %s",
 					     cfg.widget_dir.c_str());
@@ -463,6 +518,9 @@ void chat_overlay_update(void *data, obs_data_t *settings)
 					     error.c_str());
 				}
 			}
+		} else if (ctx->widget) {
+			// Field values edited in the dialog: reload the page if anything changed.
+			ctx->widget->set_overrides(overrides);
 		}
 
 		if (restart)
@@ -729,7 +787,7 @@ void config_defaults(obs_data_t *settings)
 
 obs_properties_t *chat_overlay_properties(void *data)
 {
-	UNUSED_PARAMETER(data);
+	auto *ctx = (ChatOverlay *)data;
 	obs_properties_t *props = obs_properties_create();
 
 	obs_properties_t *connection = obs_properties_create();
@@ -801,6 +859,44 @@ obs_properties_t *chat_overlay_properties(void *data)
 		OBS_TEXT_INFO);
 	obs_properties_add_group(props, "widget_group", "Виджет (HTML/CSS/JS)", OBS_GROUP_NORMAL,
 				 widget);
+
+	// Editable parameters declared by the widget in fields.txt. Values come from
+	// data.txt until the user changes a control here.
+	if (ctx && !ctx->cfg.widget_dir.empty()) {
+		const std::vector<WidgetFieldInfo> fields = widget_fields(ctx->cfg.widget_dir);
+		if (!fields.empty()) {
+			obs_properties_t *params = obs_properties_create();
+			for (const WidgetFieldInfo &field : fields) {
+				const std::string key = "wf_" + field.name;
+				if (field.type == "colorpicker") {
+					obs_properties_add_color_alpha(params, key.c_str(),
+								       field.label.c_str());
+				} else if (field.type == "checkbox") {
+					obs_properties_add_bool(params, key.c_str(), field.label.c_str());
+				} else if (field.type == "dropdown") {
+					obs_property_t *list = obs_properties_add_list(
+						params, key.c_str(), field.label.c_str(),
+						OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+					for (const auto &option : field.options)
+						obs_property_list_add_string(
+							list, option.second.c_str(), option.first.c_str());
+				} else if (field.type == "number") {
+					obs_properties_add_int(params, key.c_str(), field.label.c_str(), 0,
+							       10000, 1);
+				} else {
+					obs_properties_add_text(params, key.c_str(), field.label.c_str(),
+								OBS_TEXT_DEFAULT);
+				}
+			}
+			obs_properties_add_text(
+				params, "widget_fields_help",
+				"Значения по умолчанию берутся из data.txt. Меняйте только то, что "
+				"нужно; изменения применяются к виджету по кнопке «Применить».",
+				OBS_TEXT_INFO);
+			obs_properties_add_group(props, "widget_fields_group", "Параметры виджета",
+						 OBS_GROUP_NORMAL, params);
+		}
+	}
 
 	obs_properties_t *diagnostics = obs_properties_create();
 	obs_properties_add_bool(diagnostics, "demo_mode",

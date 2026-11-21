@@ -440,9 +440,15 @@ bool parse_css_color(const std::string &value, uint32_t &out)
 	return true;
 }
 
+std::string css_color_from_obs(uint32_t color)
+{
+	return color_to_css(color);
+}
+
 bool theme_from_css(const std::string &css, Theme &out, std::string *error)
 {
 	const std::string cleaned = strip_css_comments(css);
+
 	size_t pos = 0;
 	size_t blocks = 0;
 	while (pos < cleaned.size()) {

@@ -63,3 +63,7 @@ std::vector<std::pair<std::string, Theme>> theme_presets();
 // "#rrggbb", "#rgb", "#rrggbbaa", "rgb()", "rgba()", a few named colours.
 // The result uses the OBS byte order 0xAABBGGRR.
 bool parse_css_color(const std::string &value, uint32_t &out);
+
+// Converts an OBS colour back to a CSS "rgba(...)" string (used to feed widget
+// field values edited inside OBS).
+std::string css_color_from_obs(uint32_t color);

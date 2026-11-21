@@ -173,7 +173,8 @@ std::string value_to_string(const json::Value &value)
 	}
 }
 
-FieldValues collect_fields(const std::string &fields_json, const std::string &data_json)
+FieldValues collect_fields(const std::string &fields_json, const std::string &data_json,
+			   const std::map<std::string, std::string> &overrides)
 {
 	FieldValues result;
 
@@ -216,10 +217,13 @@ FieldValues collect_fields(const std::string &fields_json, const std::string &da
 		}
 	}
 
+	// Values edited in the OBS properties dialog win over everything from files.
+	for (const auto &item : overrides)
+		result.values[item.first] = item.second;
+
 	result.json = "{";
 	bool first = true;
-	for (const auto &item : result.values) {
-		if (!first)
+	for (const auto &item : result.values) {		if (!first)
 			result.json += ",";
 		first = false;
 		result.json += "\"" + json_escape(item.first) + "\":";
@@ -361,12 +365,13 @@ std::string build_message_event(const ChatMessage &msg, const std::string &chann
 }
 
 std::string build_page(const std::string &html, const std::string &css, const std::string &js,
-		       const std::string &fields_raw, const std::string &data_raw)
+		       const std::string &fields_raw, const std::string &data_raw,
+		       const std::map<std::string, std::string> &overrides)
 {
 	// StreamElements substitutes {field} placeholders in HTML/CSS/JS before the
 	// widget runs; the same has to happen here, otherwise colours written as
 	// "color: {textmesscol}" would be dropped by the CSS parser.
-	const FieldValues fields = collect_fields(fields_raw, data_raw);
+	const FieldValues fields = collect_fields(fields_raw, data_raw, overrides);
 	const std::string page_html = substitute_fields(html, fields.values);
 	const std::string page_css = substitute_fields(css, fields.values);
 	const std::string page_js = substitute_fields(js, fields.values);
@@ -417,7 +422,7 @@ std::string build_page(const std::string &html, const std::string &css, const st
 		"send(k+': '+Array.prototype.map.call(arguments,function(a){try{return typeof a==='string'?"
 		"a:JSON.stringify(a);}catch(e){return String(a);}}).join(' '));};});"
 		"window.addEventListener('error',function(e){send('error: '+e.message+' @'+(e.filename||'')+':'+"
-		"(e.lineno||0));});"
+		"(e.lineno||0)+(e.error&&e.error.stack?' stack: '+String(e.error.stack).slice(0,600):''));});"
 		"window.addEventListener('unhandledrejection',function(e){send('rejection: '+((e.reason&&"
 		"e.reason.message)||e.reason));});})();";
 	page += "</script><script>";
@@ -445,19 +450,80 @@ std::string build_page(const std::string &html, const std::string &css, const st
 
 } // namespace
 
+std::vector<WidgetFieldInfo> widget_fields(const std::string &dir)
+{
+	std::vector<WidgetFieldInfo> result;
+	if (dir.empty())
+		return result;
+
+	const std::string fields_raw = read_first(dir, {"fields.txt", "fields.json"});
+	if (fields_raw.empty())
+		return result;
+
+	json::Value fields;
+	if (!json::parse(fields_raw, fields) || !fields.is_object())
+		return result;
+
+	const std::string data_raw = read_first(dir, {"data.txt", "data.json"});
+	json::Value data;
+	const bool has_data =
+		!data_raw.empty() && json::parse(data_raw, data) && data.is_object();
+
+	for (const auto &field : fields.object) {
+		const json::Value *type_value = field.second.find("type");
+		const std::string type =
+			(type_value && type_value->type == json::Value::Type::String)
+				? type_value->string
+				: std::string();
+		if (type.empty() || type == "button" || type == "hidden")
+			continue;
+
+		WidgetFieldInfo info;
+		info.name = field.first;
+		info.type = type;
+		info.label = field.second.get_string("label");
+		if (info.label.empty())
+			info.label = field.first;
+
+		if (const json::Value *value = field.second.find("value"))
+			info.value = value_to_string(*value);
+		else if (has_data) {
+			if (const json::Value *stored = data.find(field.first))
+				info.value = value_to_string(*stored);
+		}
+
+		if (const json::Value *options = field.second.find("options");
+		    options && options->is_object()) {
+			for (const auto &option : options->object) {
+				const std::string label =
+					option.second.type == json::Value::Type::String
+						? option.second.string
+						: option.first;
+				info.options.emplace_back(option.first, label);
+			}
+		}
+
+		result.push_back(std::move(info));
+	}
+
+	return result;
+}
+
 WidgetHost::~WidgetHost()
 {
 	stop();
 }
 
 bool WidgetHost::start(obs_source *parent, const std::string &dir, EmoteRegistry *emotes,
-		       ImageCache *images, uint32_t width, uint32_t height, std::string *error)
+		       ImageCache *images, const std::map<std::string, std::string> &overrides,
+		       uint32_t width, uint32_t height, std::string *error)
 {
 	stop();
 
 	parent_ = parent;
 	emotes_ = emotes;
 	images_ = images;
+	overrides_ = overrides;
 	dir_ = dir;
 	width_ = width;
 	height_ = height;
@@ -526,6 +592,15 @@ void WidgetHost::stop()
 	last_viewers_ = -1;
 }
 
+void WidgetHost::set_overrides(const std::map<std::string, std::string> &overrides)
+{
+	if (overrides == overrides_)
+		return;
+	overrides_ = overrides;
+	if (source_)
+		rebuild(nullptr);
+}
+
 void WidgetHost::set_size(uint32_t width, uint32_t height)
 {
 	if (width_ == width && height_ == height)
@@ -584,7 +659,7 @@ bool WidgetHost::rebuild(std::string *error)
 	}
 
 	const std::string page =
-		build_page(html, css, js, fields, data.empty() ? "{}" : data);
+		build_page(html, css, js, fields, data.empty() ? "{}" : data, overrides_);
 	server_.set_page(page);
 	stamp_ = directory_stamp(dir_);
 	url_ = "http://127.0.0.1:" + std::to_string(server_.port()) + "/?v=" +

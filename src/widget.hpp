@@ -5,10 +5,24 @@
 
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <string>
+#include <utility>
+#include <vector>
 
 struct obs_source;
 class ImageCache;
+
+// One editable parameter declared by the widget in fields.txt.
+struct WidgetFieldInfo {
+	std::string name;
+	std::string label;
+	std::string type;  // colorpicker, checkbox, dropdown, text, number
+	std::string value; // default from fields.txt / data.txt
+	std::vector<std::pair<std::string, std::string>> options; // dropdown: key -> label
+};
+
+std::vector<WidgetFieldInfo> widget_fields(const std::string &dir);
 
 // Runs a StreamElements-style widget (HTML + CSS + JS + fields + data) inside an
 // embedded OBS browser source. The plugin serves the assembled page from a local
@@ -23,8 +37,11 @@ public:
 	WidgetHost &operator=(const WidgetHost &) = delete;
 
 	bool start(obs_source *parent, const std::string &dir, EmoteRegistry *emotes,
-		   ImageCache *images, uint32_t width, uint32_t height, std::string *error);
+		   ImageCache *images, const std::map<std::string, std::string> &overrides,
+		   uint32_t width, uint32_t height, std::string *error);
 	void stop();
+	// Field values edited in the OBS properties dialog.
+	void set_overrides(const std::map<std::string, std::string> &overrides);
 	bool active() const { return source_ != nullptr; }
 	// True once the page has connected to the local server (CEF is up).
 	bool ready() const;
@@ -61,4 +78,5 @@ private:
 	double started_at_ = 0.0;
 	bool warned_ = false;
 	std::deque<std::string> backlog_; // events sent before the page connected
+	std::map<std::string, std::string> overrides_; // field values edited in OBS
 };
