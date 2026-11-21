@@ -451,7 +451,8 @@ void chat_overlay_update(void *data, obs_data_t *settings)
 			if (cfg.widget_mode) {
 				std::string error;
 				auto host = std::make_unique<WidgetHost>();
-				if (host->start(ctx->source, cfg.widget_dir, cfg.width, cfg.height, &error)) {
+				if (host->start(ctx->source, cfg.widget_dir, ctx->emotes.get(),
+						ctx->images.get(), cfg.width, cfg.height, &error)) {
 					ctx->widget = std::move(host);
 					blog(LOG_INFO, "[chat-overlay] widget mode enabled: %s",
 					     cfg.widget_dir.c_str());

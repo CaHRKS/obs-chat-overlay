@@ -149,6 +149,12 @@ size_t HttpServer::client_count() const
 	return clients_.size();
 }
 
+void HttpServer::set_logger(std::function<void(const std::string &)> logger)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	logger_ = std::move(logger);
+}
+
 void HttpServer::accept_loop()
 {
 	while (running_.load()) {
@@ -187,6 +193,50 @@ void HttpServer::handle_connection(unsigned long long handle)
 					 ? std::string("/")
 					 : request_line.substr(first_space + 1,
 							       second_space - first_space - 1);
+
+	if (path.rfind("/log", 0) == 0) {
+		const size_t query = path.find("?m=");
+		if (query != std::string::npos) {
+			std::string message = path.substr(query + 3);
+			// Minimal percent-decoding for the values we send ourselves.
+			std::string decoded;
+			decoded.reserve(message.size());
+			for (size_t i = 0; i < message.size(); ++i) {
+				if (message[i] == '%' && i + 2 < message.size()) {
+					const auto hex = [](char c) -> int {
+						if (c >= '0' && c <= '9')
+							return c - '0';
+						if (c >= 'a' && c <= 'f')
+							return c - 'a' + 10;
+						if (c >= 'A' && c <= 'F')
+							return c - 'A' + 10;
+						return -1;
+					};
+					const int hi = hex(message[i + 1]);
+					const int lo = hex(message[i + 2]);
+					if (hi >= 0 && lo >= 0) {
+						decoded.push_back((char)((hi << 4) | lo));
+						i += 2;
+						continue;
+					}
+				}
+				decoded.push_back(message[i] == '+' ? ' ' : message[i]);
+			}
+			std::function<void(const std::string &)> logger;
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				logger = logger_;
+			}
+			if (logger)
+				logger(decoded);
+		}
+		const std::string response = "HTTP/1.1 204 No Content\r\n"
+					     "Access-Control-Allow-Origin: *\r\n"
+					     "Connection: close\r\n\r\n";
+		send_string(client, response);
+		close_socket(handle);
+		return;
+	}
 
 	if (path == "/events") {
 		const std::string headers =

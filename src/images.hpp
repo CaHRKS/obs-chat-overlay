@@ -33,6 +33,8 @@ public:
 	// Registers where a key can be downloaded from. Safe to call repeatedly.
 	void register_image(const std::string &key, const std::string &url);
 	bool has_url(const std::string &key) const;
+	// Copies the registered URL for a key (used to expose badge images to widgets).
+	bool url_for(const std::string &key, std::string &out) const;
 
 	// Queues a download for a registered key (no-op when already queued/done).
 	void request(const std::string &key);

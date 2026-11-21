@@ -20,8 +20,8 @@ public:
 	WidgetHost(const WidgetHost &) = delete;
 	WidgetHost &operator=(const WidgetHost &) = delete;
 
-	bool start(obs_source *parent, const std::string &dir, uint32_t width, uint32_t height,
-		   std::string *error);
+	bool start(obs_source *parent, const std::string &dir, EmoteRegistry *emotes,
+		   ImageCache *images, uint32_t width, uint32_t height, std::string *error);
 	void stop();
 	bool active() const { return source_ != nullptr; }
 	obs_source *source() const { return source_; }
@@ -45,6 +45,8 @@ private:
 	HttpServer server_;
 	obs_source *source_ = nullptr;
 	obs_source *parent_ = nullptr;
+	EmoteRegistry *emotes_ = nullptr;
+	ImageCache *images_ = nullptr;
 	std::string dir_;
 	std::string url_;
 	uint64_t stamp_ = 0;

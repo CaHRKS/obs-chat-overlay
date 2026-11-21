@@ -175,6 +175,16 @@ bool ImageCache::has_url(const std::string &key) const
 	return it != state_->entries.end() && !it->second.url.empty();
 }
 
+bool ImageCache::url_for(const std::string &key, std::string &out) const
+{
+	std::lock_guard<std::mutex> lock(state_->mutex);
+	const auto it = state_->entries.find(key);
+	if (it == state_->entries.end() || it->second.url.empty())
+		return false;
+	out = it->second.url;
+	return true;
+}
+
 void ImageCache::request(const std::string &key)
 {
 	std::lock_guard<std::mutex> lock(state_->mutex);

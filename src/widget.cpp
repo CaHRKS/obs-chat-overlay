@@ -1,5 +1,6 @@
 #include "widget.hpp"
 
+#include "images.hpp"
 #include "json.hpp"
 
 #include <obs-module.h>
@@ -136,6 +137,16 @@ std::string twitch_emote_url(const std::string &id, const char *size)
 	return "https://static-cdn.jtvnw.net/emoticons/v2/" + id + "/default/dark/" + size;
 }
 
+std::string bttv_emote_url(const std::string &id, int size)
+{
+	return "https://cdn.betterttv.net/emote/" + id + "/" + std::to_string(size) + "x";
+}
+
+std::string seventv_emote_url(const std::string &id, int size)
+{
+	return "https://cdn.7tv.app/emote/" + id + "/" + std::to_string(size) + "x.png";
+}
+
 // Re-emits the "value" members of a StreamElements fields definition so that the
 // widget receives them as fieldData.
 std::string field_values(const std::string &fields_json)
@@ -173,34 +184,83 @@ std::string field_values(const std::string &fields_json)
 	return out;
 }
 
-std::string build_message_event(const ChatMessage &msg, const std::string &channel, const Config &cfg)
+std::string build_message_event(const ChatMessage &msg, const std::string &channel,
+				EmoteRegistry *registry, ImageCache *images)
 {
 	std::string emotes = "[";
 	bool first = true;
+
+	const auto push_emote = [&emotes, &first](const std::string &name, const std::string &id,
+						 const char *type, const std::string &u1,
+						 const std::string &u2, const std::string &u3) {
+		if (!first)
+			emotes += ",";
+		first = false;
+		emotes += "{\"name\":\"" + json_escape(name) + "\",\"id\":\"" + json_escape(id) +
+			  "\",\"type\":\"" + type + "\",\"gif\":false,\"urls\":{\"1\":\"" + u1 +
+			  "\",\"2\":\"" + u2 + "\",\"4\":\"" + u3 + "\"}}";
+	};
+
 	for (const EmoteSpan &span : msg.emotes) {
 		const std::string name = slice_by_cp(msg.text, span.start_cp, span.end_cp);
 		if (name.empty())
 			continue;
-		if (!first)
-			emotes += ",";
-		first = false;
-		emotes += "{\"name\":\"" + json_escape(name) + "\",\"id\":\"" + json_escape(span.id) +
-			  "\",\"type\":\"twitch\",\"gif\":false,\"start\":" +
-			  std::to_string(span.start_cp) + ",\"end\":" + std::to_string(span.end_cp) +
-			  ",\"urls\":{\"1\":\"" + twitch_emote_url(span.id, "1.0") + "\",\"2\":\"" +
-			  twitch_emote_url(span.id, "2.0") + "\",\"4\":\"" +
-			  twitch_emote_url(span.id, "3.0") + "\"}}";
+		push_emote(name, span.id, "twitch", twitch_emote_url(span.id, "1.0"),
+			   twitch_emote_url(span.id, "2.0"), twitch_emote_url(span.id, "3.0"));
+	}
+
+	// Third-party emotes (BTTV / 7TV) are not announced by Twitch, so the words
+	// are matched against the shared emote registry.
+	if (registry) {
+		size_t pos = 0;
+		while (pos < msg.text.size()) {
+			size_t end = msg.text.find(' ', pos);
+			if (end == std::string::npos)
+				end = msg.text.size();
+			const std::string word = msg.text.substr(pos, end - pos);
+			pos = end + 1;
+			if (word.size() < 2)
+				continue;
+
+			std::string key;
+			if (!registry->lookup(word, key) || key.rfind("tw:", 0) == 0)
+				continue;
+
+			if (key.rfind("bttv:", 0) == 0) {
+				const std::string id = key.substr(5);
+				push_emote(word, id, "bttv", bttv_emote_url(id, 1),
+					   bttv_emote_url(id, 2), bttv_emote_url(id, 3));
+			} else if (key.rfind("7tv:", 0) == 0) {
+				const std::string id = key.substr(4);
+				push_emote(word, id, "7tv", seventv_emote_url(id, 1),
+					   seventv_emote_url(id, 2), seventv_emote_url(id, 3));
+			}
+		}
 	}
 	emotes += "]";
 
 	std::string badges = "{";
+	std::string badge_urls = "{";
 	for (size_t i = 0; i < msg.badges.size(); ++i) {
-		if (i)
+		if (i) {
 			badges += ",";
+		}
 		badges += "\"" + json_escape(msg.badges[i].set_id) + "\":\"" +
 			  json_escape(msg.badges[i].version) + "\"";
+
+		std::string url;
+		const std::string key =
+			"badge:" + msg.badges[i].set_id + "/" + msg.badges[i].version;
+		if (images && images->url_for(key, url)) {
+			if (i)
+				badge_urls += ",";
+			badge_urls += "\"" + json_escape(msg.badges[i].set_id) + "/" +
+				      json_escape(msg.badges[i].version) + "\":\"" + json_escape(url) +
+				      "\"";
+		}
 	}
 	badges += "}";
+	badge_urls += "}";
 
 	std::string event = "{\"listener\":\"message\",\"event\":{\"service\":\"twitch\",\"data\":{";
 	event += "\"time\":" + std::to_string(now_ms());
@@ -213,10 +273,10 @@ std::string build_message_event(const ChatMessage &msg, const std::string &chann
 	event += ",\"msgId\":\"\"";
 	event += ",\"userId\":\"\"";
 	event += ",\"badges\":" + badges;
+	event += ",\"badgeUrls\":" + badge_urls;
 	event += ",\"emotes\":" + emotes;
 	event += ",\"tags\":{}";
 	event += "}}}";
-	(void)cfg;
 	return event;
 }
 
@@ -231,11 +291,27 @@ std::string build_page(const std::string &html, const std::string &css, const st
 	page += "<style>html,body{margin:0;padding:0;background:transparent;overflow:hidden;}"
 		"</style>";
 	page += "<script src=\"https://code.jquery.com/jquery-3.7.1.min.js\"></script>";
+	page += "<link rel=\"stylesheet\" "
+		"href=\"https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css\">";
 	page += "<style>";
 	page += css;
 	page += "</style></head><body>";
 	page += html;
 	page += "<script>";
+	// Report page errors and console output to the plugin log: the embedded
+	// browser has no visible devtools, and this is the only way to diagnose
+	// why a third-party widget misbehaves.
+	page += "(function(){var send=function(m){try{fetch('/log?m='+encodeURIComponent(String(m)"
+		".slice(0,400)));}catch(e){}};"
+		"['log','warn','error'].forEach(function(k){var o=console[k];console[k]=function(){"
+		"try{o.apply(console,arguments);}catch(e){}"
+		"send(k+': '+Array.prototype.map.call(arguments,function(a){try{return typeof a==='string'?"
+		"a:JSON.stringify(a);}catch(e){return String(a);}}).join(' '));};});"
+		"window.addEventListener('error',function(e){send('error: '+e.message+' @'+(e.filename||'')+':'+"
+		"(e.lineno||0));});"
+		"window.addEventListener('unhandledrejection',function(e){send('rejection: '+((e.reason&&"
+		"e.reason.message)||e.reason));});})();";
+	page += "</script><script>";
 	// Minimal StreamElements runtime stubs so widgets do not throw on load.
 	page += "window.SE_API=window.SE_API||{store:{get:function(){return Promise.resolve(null);},"
 		"set:function(){return Promise.resolve();}},counters:{get:function(){return "
@@ -265,12 +341,14 @@ WidgetHost::~WidgetHost()
 	stop();
 }
 
-bool WidgetHost::start(obs_source *parent, const std::string &dir, uint32_t width, uint32_t height,
-		       std::string *error)
+bool WidgetHost::start(obs_source *parent, const std::string &dir, EmoteRegistry *emotes,
+		       ImageCache *images, uint32_t width, uint32_t height, std::string *error)
 {
 	stop();
 
 	parent_ = parent;
+	emotes_ = emotes;
+	images_ = images;
 	dir_ = dir;
 	width_ = width;
 	height_ = height;
@@ -282,6 +360,9 @@ bool WidgetHost::start(obs_source *parent, const std::string &dir, uint32_t widt
 	}
 
 	std::string server_error;
+	server_.set_logger([](const std::string &message) {
+		blog(LOG_WARNING, "[chat-overlay] widget console: %s", message.c_str());
+	});
 	if (!server_.start(&server_error)) {
 		if (error)
 			*error = "local server: " + server_error;
@@ -439,7 +520,8 @@ void WidgetHost::feed(const ChatMessage &msg, const std::string &channel, const 
 {
 	if (!source_)
 		return;
-	server_.broadcast(build_message_event(msg, channel, cfg));
+	(void)cfg;
+	server_.broadcast(build_message_event(msg, channel, emotes_, images_));
 }
 
 void WidgetHost::render()
