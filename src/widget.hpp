@@ -71,6 +71,7 @@ private:
 	std::string dir_;
 	std::string url_;
 	uint64_t stamp_ = 0;
+	uint64_t generation_ = 0; // bumped on every rebuild to force a page reload
 	uint32_t width_ = 0;
 	uint32_t height_ = 0;
 	int last_viewers_ = -1;

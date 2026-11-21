@@ -45,6 +45,7 @@ Config config_from_settings(obs_data_t *settings)
 	cfg.demo_mode = obs_data_get_bool(settings, "demo_mode");
 	cfg.widget_mode = obs_data_get_bool(settings, "widget_mode");
 	cfg.widget_dir = trim(obs_data_get_string(settings, "widget_dir"));
+	cfg.twitch_nick_colors = obs_data_get_bool(settings, "twitch_nick_colors");
 
 	cfg.width = (uint32_t)obs_data_get_int(settings, "width");
 	cfg.height = (uint32_t)obs_data_get_int(settings, "height");
@@ -783,6 +784,7 @@ void config_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "demo_mode", false);
 	obs_data_set_default_bool(settings, "widget_mode", false);
 	obs_data_set_default_string(settings, "widget_dir", "");
+	obs_data_set_default_bool(settings, "twitch_nick_colors", true);
 }
 
 obs_properties_t *chat_overlay_properties(void *data)
@@ -847,6 +849,9 @@ obs_properties_t *chat_overlay_properties(void *data)
 	obs_properties_add_path(
 		widget, "widget_dir", "Папка виджета (html/css/js/fields/data)", OBS_PATH_DIRECTORY,
 		nullptr, nullptr);
+	obs_properties_add_bool(
+		widget, "twitch_nick_colors",
+		"Красить ники цветом Twitch (выключить — использовать цвет из виджета)");
 	obs_properties_add_text(
 		widget, "widget_help",
 		"Включите режим и укажите папку с файлами виджета из StreamElements "

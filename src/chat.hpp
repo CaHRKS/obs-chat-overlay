@@ -109,6 +109,8 @@ struct Config {
 	// Widget mode: run a StreamElements HTML/CSS/JS widget in a browser source
 	bool widget_mode = false;
 	std::string widget_dir;
+	// Use the viewer's Twitch colour for nicknames instead of the widget's own.
+	bool twitch_nick_colors = true;
 };
 
 // ---------------------------------------------------------------------------

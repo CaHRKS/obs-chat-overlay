@@ -269,7 +269,7 @@ std::string substitute_fields(const std::string &text, const std::map<std::strin
 }
 
 std::string build_message_event(const ChatMessage &msg, const std::string &channel,
-				EmoteRegistry *registry, ImageCache *images)
+				EmoteRegistry *registry, ImageCache *images, const Config &cfg)
 {
 	std::string emotes = "[";
 	bool first = true;
@@ -350,7 +350,8 @@ std::string build_message_event(const ChatMessage &msg, const std::string &chann
 	event += "\"time\":" + std::to_string(now_ms());
 	event += ",\"nick\":\"" + json_escape(msg.user) + "\"";
 	event += ",\"displayName\":\"" + json_escape(msg.display.empty() ? msg.user : msg.display) + "\"";
-	event += ",\"displayColor\":\"" + json_escape(msg.color) + "\"";
+	event += ",\"displayColor\":\"" + json_escape(cfg.twitch_nick_colors ? msg.color : "") +
+		 "\"";
 	event += ",\"channel\":\"" + json_escape(channel) + "\"";
 	event += ",\"text\":\"" + json_escape(msg.text) + "\"";
 	event += ",\"isAction\":" + std::string(msg.action ? "true" : "false");
@@ -416,7 +417,7 @@ std::string build_page(const std::string &html, const std::string &css, const st
 	// browser has no visible devtools, and this is the only way to diagnose
 	// why a third-party widget misbehaves.
 	page += "(function(){var send=function(m){try{fetch('/log?m='+encodeURIComponent(String(m)"
-		".slice(0,400)));}catch(e){}};"
+		".slice(0,1200)));}catch(e){}};"
 		"['log','warn','error'].forEach(function(k){var o=console[k];console[k]=function(){"
 		"try{o.apply(console,arguments);}catch(e){}"
 		"send(k+': '+Array.prototype.map.call(arguments,function(a){try{return typeof a==='string'?"
@@ -424,7 +425,14 @@ std::string build_page(const std::string &html, const std::string &css, const st
 		"window.addEventListener('error',function(e){send('error: '+e.message+' @'+(e.filename||'')+':'+"
 		"(e.lineno||0)+(e.error&&e.error.stack?' stack: '+String(e.error.stack).slice(0,600):''));});"
 		"window.addEventListener('unhandledrejection',function(e){send('rejection: '+((e.reason&&"
-		"e.reason.message)||e.reason));});})();";
+		"e.reason.message)||e.reason));});"
+		// Log every network request the widget makes: this shows whether it uses
+		// our emotes payload or fetches its own data from the StreamElements API.
+		"try{var of=window.fetch;if(of){window.fetch=function(u,o){try{send('fetch: '+("
+		"typeof u==='string'?u:(u&&u.url)||''));}catch(e){}return of.call(this,u,o);};}}catch(e){}"
+		"try{var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){"
+		"try{send('xhr: '+m+' '+u);}catch(e){}return xo.apply(this,arguments);};}catch(e){}"
+		"})();";
 	page += "</script><script>";
 	// Minimal StreamElements runtime stubs so widgets do not throw on load.
 	page += "window.SE_API=window.SE_API||{store:{get:function(){return Promise.resolve(null);},"
@@ -662,12 +670,28 @@ bool WidgetHost::rebuild(std::string *error)
 		build_page(html, css, js, fields, data.empty() ? "{}" : data, overrides_);
 	server_.set_page(page);
 	stamp_ = directory_stamp(dir_);
+	// The URL must change on every rebuild, otherwise obs_source_update() keeps
+	// the same URL and the browser never reloads the new page (field edits would
+	// be invisible).
+	++generation_;
 	url_ = "http://127.0.0.1:" + std::to_string(server_.port()) + "/?v=" +
-	       std::to_string(stamp_);
+	       std::to_string(generation_) + "_" + std::to_string(stamp_);
 	apply_size();
 
 	blog(LOG_INFO, "[chat-overlay] widget page rebuilt (%zu bytes, html=%zu css=%zu js=%zu)",
 	     page.size(), html.size(), css.size(), js.size());
+
+	// Log the colour values that actually went into the CSS, so the on-screen
+	// result can be compared with the properties dialog.
+	static const char *kColorKeys[] = {"namecol", "textmesscol",   "backgroundcol",
+					   "shadownamecol", "shadowtextcol", "shadowelemcol",
+					   "flowercol", "dividercol"};
+	for (const char *key : kColorKeys) {
+		const auto it = fields.values.find(key);
+		if (it != fields.values.end())
+			blog(LOG_INFO, "[chat-overlay] widget field %s = %s", key,
+			     it->second.c_str());
+	}
 	return true;
 }
 
@@ -732,9 +756,8 @@ void WidgetHost::feed(const ChatMessage &msg, const std::string &channel, const 
 {
 	if (!source_)
 		return;
-	(void)cfg;
 
-	const std::string event = build_message_event(msg, channel, emotes_, images_);
+	const std::string event = build_message_event(msg, channel, emotes_, images_, cfg);
 	if (!ready()) {
 		backlog_.push_back(event);
 		if (backlog_.size() > 30)
