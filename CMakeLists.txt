@@ -16,17 +16,10 @@ add_library(${CMAKE_PROJECT_NAME} MODULE)
 find_package(libobs REQUIRED)
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs)
 
-target_sources(
-  ${CMAKE_PROJECT_NAME}
-  PRIVATE src/plugin-main.cpp
-          src/chat.cpp
-          src/json.cpp
-          src/net.cpp
-          src/images.cpp
-          src/render.cpp
-          src/theme.cpp
-          src/twitch.cpp
-)
+# All translation units in src/ are picked up automatically, so adding a new
+# .cpp file never requires editing this file (a common source of link errors).
+file(GLOB CHAT_OVERLAY_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${CHAT_OVERLAY_SOURCES})
 
 set_target_properties(
   ${CMAKE_PROJECT_NAME}
@@ -38,7 +31,7 @@ set_target_properties(
 # Windows system libraries used by the renderer (Direct2D / DirectWrite / WIC) and
 # by the network layer (WinHTTP). No third-party dependencies are required.
 target_link_libraries(
-  ${CMAKE_PROJECT_NAME} PRIVATE d2d1 dwrite windowscodecs winhttp ole32 shlwapi
+  ${CMAKE_PROJECT_NAME} PRIVATE d2d1 dwrite windowscodecs winhttp ole32 shlwapi ws2_32
 )
 
 if(MSVC)
