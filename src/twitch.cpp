@@ -701,7 +701,16 @@ void TwitchWorker::load_emotes(State &state, const std::string &broadcaster_id)
 	if (state.stop.load())
 		return;
 
+	const size_t global_count = global_entries.size();
+	const size_t channel_count = channel_entries.size();
+
 	state.emotes->set_global(std::move(global_entries));
 	state.emotes->set_channel(std::move(channel_entries));
-	blog(LOG_INFO, "[chat-overlay] emotes loaded: %zu", state.emotes->size());
+	blog(LOG_INFO, "[chat-overlay] emotes loaded: %zu (global %zu, channel %zu)",
+	     state.emotes->size(), global_count, channel_count);
+	if (!broadcaster_id.empty() && channel_count == 0)
+		blog(LOG_INFO,
+		     "[chat-overlay] channel emotes unavailable: 7TV/BTTV channel API returned "
+		     "nothing for id %s",
+		     broadcaster_id.c_str());
 }

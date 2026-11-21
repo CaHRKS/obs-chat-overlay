@@ -7,12 +7,15 @@
 
 #include "httpd.hpp"
 
-#include <obs-module.h>
-
+// winsock2.h must be included before windows.h (which obs-module.h pulls in),
+// otherwise the old winsock.h wins and the build fails on conflicting types.
 #include <winsock2.h>
 #include <ws2tcpip.h>
+
+#include <obs-module.h>
 #include <windows.h>
 
+#include <cstddef>
 #include <cstring>
 
 namespace {
@@ -157,6 +160,64 @@ void HttpServer::set_logger(std::function<void(const std::string &)> logger)
 	logger_ = std::move(logger);
 }
 
+bool HttpServer::self_test(std::string *detail)
+{
+	if (!running_ || !port_) {
+		if (detail)
+			*detail = "server is not running";
+		return false;
+	}
+
+	const SOCKET probe = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (probe == INVALID_SOCKET) {
+		if (detail)
+			*detail = "socket() failed";
+		return false;
+	}
+
+	DWORD timeout = 2500;
+	setsockopt(probe, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof(timeout));
+	setsockopt(probe, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout, sizeof(timeout));
+
+	sockaddr_in address = {};
+	address.sin_family = AF_INET;
+	address.sin_port = htons((unsigned short)port_);
+	address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+	if (connect(probe, (const sockaddr *)&address, sizeof(address)) == SOCKET_ERROR) {
+		if (detail)
+			*detail = "connect failed, error " + std::to_string(WSAGetLastError());
+		closesocket(probe);
+		return false;
+	}
+
+	const char request[] = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+	send(probe, request, (int)(sizeof(request) - 1), 0);
+
+	char buffer[512];
+	const int received = recv(probe, buffer, sizeof(buffer), 0);
+	closesocket(probe);
+
+	if (received <= 0) {
+		if (detail)
+			*detail = "no response from server";
+		return false;
+	}
+
+	const std::string response(buffer, (size_t)received);
+	if (response.rfind("HTTP/1.1 200", 0) != 0) {
+		if (detail)
+			*detail = "unexpected response: " + response.substr(0, 48);
+		return false;
+	}
+	if (response.find("<!DOCTYPE html") == std::string::npos) {
+		if (detail)
+			*detail = "page body is missing";
+		return false;
+	}
+	return true;
+}
+
 void HttpServer::accept_loop()
 {
 	while (running_.load()) {
@@ -207,15 +268,21 @@ void HttpServer::handle_connection(unsigned long long handle)
 	const size_t first_space = request_line.find(' ');
 	const size_t second_space =
 		first_space == std::string::npos ? std::string::npos : request_line.find(' ', first_space + 1);
-	const std::string path = (first_space == std::string::npos || second_space == std::string::npos)
-					 ? std::string("/")
-					 : request_line.substr(first_space + 1,
-							       second_space - first_space - 1);
+	std::string raw_path = (first_space == std::string::npos || second_space == std::string::npos)
+				       ? std::string("/")
+				       : request_line.substr(first_space + 1,
+							     second_space - first_space - 1);
+	// The page is requested as "/?v=<timestamp>", so routing uses the path
+	// without the query; "/log" still needs the raw value to read ?m=...
+	std::string path = raw_path;
+	const size_t question = path.find('?');
+	if (question != std::string::npos)
+		path.resize(question);
 
-	if (path.rfind("/log", 0) == 0) {
-		const size_t query = path.find("?m=");
-		if (query != std::string::npos) {
-			std::string message = path.substr(query + 3);
+	if (path == "/log") {
+		const size_t marker = raw_path.find("?m=");
+		if (marker != std::string::npos) {
+			std::string message = raw_path.substr(marker + 3);
 			// Minimal percent-decoding for the values we send ourselves.
 			std::string decoded;
 			decoded.reserve(message.size());
@@ -276,21 +343,23 @@ void HttpServer::handle_connection(unsigned long long handle)
 		return;
 	}
 
+	const bool is_page = path == "/" || path == "/index.html";
 	std::string body;
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
 		body = page_;
 	}
-	if (path != "/" && path != "/index.html") {
-		body = "<!DOCTYPE html><html><body>404</body></html>";
-	}
+	if (!is_page)
+		body = "<!DOCTYPE html><html><body><h1>404 Not Found</h1></body></html>";
 
-	const std::string response = "HTTP/1.1 200 OK\r\n"
-				     "Content-Type: text/html; charset=utf-8\r\n"
-				     "Cache-Control: no-cache, no-store\r\n"
-				     "Connection: close\r\n"
-				     "Content-Length: " +
-				     std::to_string(body.size()) + "\r\n\r\n" + body;
+	const std::string response =
+		std::string(is_page ? "HTTP/1.1 200 OK" : "HTTP/1.1 404 Not Found") +
+		"\r\n"
+		"Content-Type: text/html; charset=utf-8\r\n"
+		"Cache-Control: no-cache, no-store\r\n"
+		"Connection: close\r\n"
+		"Content-Length: " +
+		std::to_string(body.size()) + "\r\n\r\n" + body;
 	send_string(client, response);
 	shutdown(client, SD_SEND);
 	close_socket(handle);

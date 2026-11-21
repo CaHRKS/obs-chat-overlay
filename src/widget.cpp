@@ -491,6 +491,17 @@ bool WidgetHost::start(obs_source *parent, const std::string &dir, EmoteRegistry
 		return false;
 	}
 
+	// Verify the local server end-to-end before blaming the browser.
+	std::string probe;
+	if (server_.self_test(&probe))
+		blog(LOG_INFO, "[chat-overlay] http self-test ok: %s", url_.c_str());
+	else
+		blog(LOG_WARNING, "[chat-overlay] http self-test FAILED (%s) for %s", probe.c_str(),
+		     url_.c_str());
+
+	blog(LOG_INFO, "[chat-overlay] browser source ready: id=%s size=%ux%u",
+	     obs_source_get_id(source_), width_, height_);
+
 	blog(LOG_INFO, "[chat-overlay] widget hosted at %s (viewers: %d)", url_.c_str(),
 	     (int)server_.client_count());
 	return true;
@@ -556,10 +567,6 @@ void WidgetHost::apply_size()
 		obs_source_update(source_, settings);
 	}
 	obs_data_release(settings);
-
-	if (source_)
-		blog(LOG_INFO, "[chat-overlay] browser source ready: id=%s size=%ux%u",
-		     obs_source_get_id(source_), width_, height_);
 }
 
 bool WidgetHost::rebuild(std::string *error)

@@ -28,6 +28,9 @@ public:
 	size_t client_count() const;
 	// Receives "/log?m=..." requests from the widget page (console.errors etc.).
 	void set_logger(std::function<void(const std::string &)> logger);
+	// Fetches "/" over loopback and checks the response. Used right after start
+	// so a broken server shows up in the log immediately, not in the OBS preview.
+	bool self_test(std::string *detail);
 
 private:
 	void accept_loop();

@@ -265,6 +265,15 @@ void ImageCache::worker_main(std::shared_ptr<State> state)
 		if (!ok && state->debug.load()) {
 			blog(LOG_WARNING, "[chat-overlay] image failed: %s (%s) status=%ld", key.c_str(),
 			     url.c_str(), response.status);
+		} else if (!ok) {
+			// Always surface the first few failures: missing badge/emote art is
+			// otherwise completely silent.
+			static std::atomic<int> reported{0};
+			if (reported.fetch_add(1) < 8)
+				blog(LOG_INFO,
+				     "[chat-overlay] image failed: %s (%s) status=%ld "
+				     "(further failures are hidden)",
+				     key.c_str(), url.c_str(), response.status);
 		}
 
 		{
