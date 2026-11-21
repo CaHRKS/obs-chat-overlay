@@ -786,12 +786,13 @@ void WidgetHost::apply_size()
 	obs_data_set_string(settings, "css", css_.c_str());
 
 	if (!source_) {
-		// Unique name: OBS keeps the previous browser source alive until its CEF
-		// teardown completes, and reusing the name triggers a rename warning.
+		// A *private* source: obs_source_create() would register the browser in the
+		// scene collection, so OBS saved it as an orphan. On the next start it was
+		// loaded but never shown, and destroying a browser source that never got a
+		// CEF browser crashes libcef (obs_source_destroy_defer -> CefPostTask).
 		static int instance = 0;
 		const std::string name = "chat-overlay-widget-" + std::to_string(++instance);
-		source_ =
-			obs_source_create("browser_source", name.c_str(), settings, nullptr);
+		source_ = obs_source_create_private("browser_source", name.c_str(), settings);
 		if (source_) {
 			obs_source_inc_showing(source_);
 			// Registers the browser as an active child of our source: OBS then
