@@ -340,6 +340,12 @@ void HttpServer::handle_connection(unsigned long long handle)
 		}
 		std::lock_guard<std::mutex> lock(mutex_);
 		clients_.push_back(handle);
+		// Every page reload opens a new EventSource; without dropping the oldest
+		// connections the list grows forever and each message is sent N times.
+		while (clients_.size() > 4) {
+			close_socket(clients_.front());
+			clients_.erase(clients_.begin());
+		}
 		blog(LOG_DEBUG, "[chat-overlay] httpd: event stream client connected (~%zu total)",
 		     clients_.size());
 		return;

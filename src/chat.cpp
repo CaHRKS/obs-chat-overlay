@@ -199,6 +199,9 @@ IrcKind parse_irc_line(const std::string &line, ChatMessage &msg, std::string &p
 	if (const std::string *v = find_tag(tags, "badges"); v && !v->empty())
 		parse_badges_tag(*v, msg.badges);
 
+	for (const auto &tag : tags)
+		msg.tags[tag.first] = tag.second;
+
 	// /me messages arrive wrapped in the ACTION CTCP marker.
 	const std::string action_prefix = "\x01" "ACTION ";
 	if (msg.text.size() > action_prefix.size() && msg.text.compare(0, action_prefix.size(), action_prefix) == 0) {

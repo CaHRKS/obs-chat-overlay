@@ -222,9 +222,25 @@ FieldValues collect_fields(const std::string &fields_json, const std::string &da
 	for (const auto &item : overrides)
 		result.values[item.first] = item.second;
 
+	// Fallbacks for the placeholders this widget uses. Without them an unresolved
+	// "{emoteSize}" would survive into the CSS/JS and break that declaration.
+	static const struct {
+		const char *key;
+		const char *value;
+	} kDefaults[] = {{"emoteSize", "51"},    {"namecol", "#ffffff"},
+			 {"textmesscol", "#ffffff"}, {"backgroundcol", "rgba(0, 0, 0, 0.15)"},
+			 {"shadownamecol", "#ffffff"}, {"shadowtextcol", "#ffffff"},
+			 {"shadowelemcol", "#ffffff"}, {"flowercol", "#ffffff"},
+			 {"dividercol", "#ffffff"}};
+	for (const auto &entry : kDefaults) {
+		if (!result.values.count(entry.key))
+			result.values[entry.key] = entry.value;
+	}
+
 	result.json = "{";
 	bool first = true;
-	for (const auto &item : result.values) {		if (!first)
+	for (const auto &item : result.values) {
+		if (!first)
 			result.json += ",";
 		first = false;
 		result.json += "\"" + json_escape(item.first) + "\":";
@@ -324,27 +340,34 @@ std::string build_message_event(const ChatMessage &msg, const std::string &chann
 	}
 	emotes += "]";
 
-	std::string badges = "{";
+	// StreamElements sends "badges" as an array of objects; the widget calls
+	// data.badges.push() when the provider is "twitch", so an object would throw.
+	std::string badges = "[";
 	std::string badge_urls = "{";
+	bool first_badge = true;
 	for (size_t i = 0; i < msg.badges.size(); ++i) {
-		if (i) {
-			badges += ",";
-		}
-		badges += "\"" + json_escape(msg.badges[i].set_id) + "\":\"" +
-			  json_escape(msg.badges[i].version) + "\"";
-
 		std::string url;
 		const std::string key =
 			"badge:" + msg.badges[i].set_id + "/" + msg.badges[i].version;
-		if (images && images->url_for(key, url)) {
-			if (i)
+		if (images)
+			images->url_for(key, url);
+
+		if (!first_badge)
+			badges += ",";
+		first_badge = false;
+		badges += "{\"type\":\"" + json_escape(msg.badges[i].set_id) + "\",\"version\":\"" +
+			  json_escape(msg.badges[i].version) + "\",\"url\":\"" + json_escape(url) +
+			  "\"}";
+
+		if (!url.empty()) {
+			if (!badge_urls.empty() && badge_urls.size() > 1)
 				badge_urls += ",";
 			badge_urls += "\"" + json_escape(msg.badges[i].set_id) + "/" +
 				      json_escape(msg.badges[i].version) + "\":\"" + json_escape(url) +
 				      "\"";
 		}
 	}
-	badges += "}";
+	badges += "]";
 	badge_urls += "}";
 
 	std::string event = "{\"listener\":\"message\",\"event\":{\"service\":\"twitch\",\"data\":{";
@@ -354,14 +377,32 @@ std::string build_message_event(const ChatMessage &msg, const std::string &chann
 	event += ",\"displayColor\":\"" + json_escape(cfg.twitch_nick_colors ? msg.color : "") +
 		 "\"";
 	event += ",\"channel\":\"" + json_escape(channel) + "\"";
+	// Full IRC tag set: the widget reads tags.id, tags.color, tags['tmi-sent-ts']
+	// and throws "Cannot read properties of undefined (reading 'id')" if it is
+	// missing — which aborted its initialisation and broke message limits.
+	std::string tags = "{";
+	bool first_tag = true;
+	for (const auto &tag : msg.tags) {
+		if (!first_tag)
+			tags += ",";
+		first_tag = false;
+		tags += "\"" + json_escape(tag.first) + "\":\"" + json_escape(tag.second) + "\"";
+	}
+	tags += "}";
+
+	const auto tag_value = [&msg](const char *name) -> std::string {
+		const auto it = msg.tags.find(name);
+		return it == msg.tags.end() ? std::string() : it->second;
+	};
+
 	event += ",\"text\":\"" + json_escape(msg.text) + "\"";
 	event += ",\"isAction\":" + std::string(msg.action ? "true" : "false");
-	event += ",\"msgId\":\"\"";
-	event += ",\"userId\":\"\"";
+	event += ",\"msgId\":\"" + json_escape(tag_value("id")) + "\"";
+	event += ",\"userId\":\"" + json_escape(tag_value("user-id")) + "\"";
 	event += ",\"badges\":" + badges;
 	event += ",\"badgeUrls\":" + badge_urls;
 	event += ",\"emotes\":" + emotes;
-	event += ",\"tags\":{}";
+	event += ",\"tags\":" + tags;
 	event += "}}}";
 	return event;
 }
@@ -419,6 +460,8 @@ std::string build_page(const std::string &html, const std::string &css, const st
 	// why a third-party widget misbehaves.
 	page += "(function(){var send=function(m){try{fetch('/log?m='+encodeURIComponent(String(m)"
 		".slice(0,1200)));}catch(e){}};"
+		// Later <script> blocks need the logger too (payload diagnostics).
+		"window.__chatLog=send;"
 		"['log','warn','error'].forEach(function(k){var o=console[k];console[k]=function(){"
 		"try{o.apply(console,arguments);}catch(e){}"
 		"send(k+': '+Array.prototype.map.call(arguments,function(a){try{return typeof a==='string'?"
@@ -432,6 +475,12 @@ std::string build_page(const std::string &html, const std::string &css, const st
 		// (each logged line produced another fetch and flooded the connection).
 		"try{var of=window.fetch;if(of){var nf=0;window.fetch=function(u,o){var url=("
 		"typeof u==='string')?u:((u&&u.url)||'');"
+		// The widget asks StreamElements for the emote provider
+		// (fetch('…/kappa/v2/channels/'+detail.data.channel.id+'/').then(j=>provider=j.provider)).
+		// Without that answer emotes take a slow fallback path, so answer locally.
+		"if(url.indexOf('api.streamelements.com')>=0){"
+		"return Promise.resolve(new Response(JSON.stringify({provider:'twitch'}),"
+		"{status:200,headers:{'Content-Type':'application/json'}}));}"
 		"if(url.indexOf('/log')>=0||url.indexOf('/events')>=0)return of.call(this,u,o);"
 		"try{if(nf<40){nf++;send('fetch: '+url);}}catch(e){}return of.call(this,u,o);};}}catch(e){}"
 		"try{var xo=XMLHttpRequest.prototype.open;var nx=0;"
@@ -452,11 +501,20 @@ std::string build_page(const std::string &html, const std::string &css, const st
 	page += fields.json.empty() ? std::string("{}") : fields.json;
 	page += ";var DATA=";
 	page += data_raw.empty() ? std::string("{}") : data_raw;
+	// StreamElements always passes session data with a channel object; the widget
+	// reads detail.data.channel.id when resolving the emote provider.
+	page += ";if(!DATA.channel)DATA.channel={id:'0',username:'channel'};";
 	page += ";function fire(){try{window.dispatchEvent(new CustomEvent('onWidgetLoad',{detail:{"
 		"fieldData:FIELDS,data:DATA}}));}catch(e){}}"
 		"if(document.readyState==='complete'){setTimeout(fire,150);}"
 		"else{window.addEventListener('load',function(){setTimeout(fire,150);});}"
 		"try{var es=new EventSource('/events');es.onmessage=function(e){try{var p=JSON.parse(e.data);"
+		// Diagnostics: show what the page actually receives, the widget needs
+		// emotes[i].urls[2] and silently draws nothing when it is missing.
+		"try{if(window.__emoteLogs===undefined)window.__emoteLogs=0;"
+		"if(window.__emoteLogs<3){var dd=p&&p.event&&p.event.data;var ee=dd&&dd.emotes;"
+		"window.__emoteLogs++;if(window.__chatLog)window.__chatLog('payload emotes: '+"
+		"(ee?ee.length:'none')+' '+(ee&&ee[0]?JSON.stringify(ee[0]).slice(0,180):''));}}catch(x){}"
 		"window.dispatchEvent(new CustomEvent('onEventReceived',{detail:p}));}catch(err){}};"
 		"}catch(err){}})();</script>";
 	page += "</body></html>";

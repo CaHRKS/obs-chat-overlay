@@ -33,6 +33,8 @@ struct ChatMessage {
 	bool action = false; // /me message
 	std::vector<EmoteSpan> emotes;
 	std::vector<BadgeRef> badges;
+	// Raw IRC tags; the widget expects the full set (id, color, tmi-sent-ts...).
+	std::map<std::string, std::string> tags;
 	double recv_time = 0.0;
 };
 

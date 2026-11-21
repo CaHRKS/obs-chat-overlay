@@ -441,8 +441,19 @@ void chat_overlay_update(void *data, obs_data_t *settings)
 	// Fill dialog defaults for the widget's editable fields, then collect only
 	// the values the user actually changed.
 	ensure_widget_field_defaults(settings, cfg.widget_dir);
-	const std::map<std::string, std::string> overrides =
-		widget_overrides(settings, cfg.widget_dir);
+	std::map<std::string, std::string> overrides = widget_overrides(settings, cfg.widget_dir);
+	// Keep the conversation from growing without limit: every message on screen
+	// carries infinite CSS animations, so a growing list slowly eats the CPU.
+	if (!overrides.count("hideAfter")) {
+		const long long seconds = obs_data_get_int(settings, "widget_hide_after");
+		if (seconds > 0)
+			overrides["hideAfter"] = std::to_string(seconds);
+	}
+	if (!overrides.count("messagesLimit")) {
+		const long long limit = obs_data_get_int(settings, "widget_messages_limit");
+		if (limit > 0)
+			overrides["messagesLimit"] = std::to_string(limit);
+	}
 	apply_pending_theme(ctx, settings, cfg);
 
 	std::unique_ptr<TwitchWorker> previous_worker;
@@ -858,6 +869,8 @@ void config_defaults(obs_data_t *settings)
 	obs_data_set_default_string(settings, "widget_dir", "");
 	obs_data_set_default_bool(settings, "twitch_nick_colors", true);
 	obs_data_set_default_int(settings, "widget_fps", 15);
+	obs_data_set_default_int(settings, "widget_hide_after", 60);
+	obs_data_set_default_int(settings, "widget_messages_limit", 15);
 }
 
 obs_properties_t *chat_overlay_properties(void *data)
@@ -928,6 +941,10 @@ obs_properties_t *chat_overlay_properties(void *data)
 	obs_properties_add_int(
 		widget, "widget_fps",
 		"Частота кадров виджета (меньше — меньше нагрузка на CPU)", 5, 60, 1);
+	obs_properties_add_int(widget, "widget_hide_after",
+			       "Скрывать сообщение через, сек (0 = как в виджете)", 0, 3600, 5);
+	obs_properties_add_int(widget, "widget_messages_limit",
+			       "Максимум сообщений на экране (0 = как в виджете)", 0, 50, 1);
 	obs_properties_add_text(
 		widget, "widget_help",
 		"Включите режим и укажите папку с файлами виджета из StreamElements "
