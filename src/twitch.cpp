@@ -167,13 +167,14 @@ bool TwitchWorker::sleep_interruptible(State &state, int milliseconds)
 
 void TwitchWorker::thread_main(std::shared_ptr<State> state)
 {
-	run(*state);
+	run(state);
 	state->connected = false;
 	state->done = true;
 }
 
-void TwitchWorker::run(State &state)
+void TwitchWorker::run(std::shared_ptr<State> state_ptr)
 {
+	State &state = *state_ptr;
 	CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
 	blog(LOG_INFO, "[chat-overlay] worker start: channel=%s tls=%d proxy=%s debug=%d",
@@ -181,7 +182,15 @@ void TwitchWorker::run(State &state)
 	     state.cfg.use_tls ? 1 : 0, state.cfg.proxy.empty() ? "<direct>" : state.cfg.proxy.c_str(),
 	     state.cfg.debug_log ? 1 : 0);
 
-	load_metadata(state);
+	// Badges and BTTV/7TV emotes take many seconds to load (several HTTP calls).
+	// Do that in the background so the IRC connection is established immediately
+	// and chat shows up within a second.
+	std::thread metadata_thread([state_ptr]() {
+		CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+		TwitchWorker::load_metadata(*state_ptr);
+		CoUninitialize();
+	});
+	metadata_thread.detach();
 
 	int backoff = 2;
 	while (!state.stop.load()) {

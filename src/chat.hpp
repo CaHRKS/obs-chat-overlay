@@ -104,6 +104,7 @@ struct Config {
 	// Network
 	std::string proxy; // HTTP proxy "host:port", empty for a direct connection
 	bool debug_log = false; // log raw IRC traffic and HTTP failures
+	bool demo_mode = false; // inject local test messages instead of connecting
 };
 
 // ---------------------------------------------------------------------------
