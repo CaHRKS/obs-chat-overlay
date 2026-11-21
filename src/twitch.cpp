@@ -452,6 +452,46 @@ size_t TwitchWorker::load_badges_public(State &state, const std::string &room_id
 	return registered;
 }
 
+// Badges from the public ivr.fi mirror of the Twitch API. Needs no credentials
+// and returns both global and channel badge sets for a channel login.
+size_t TwitchWorker::load_badges_ivr(State &state)
+{
+	if (state.cfg.channel.empty())
+		return 0;
+
+	const HttpResult response = http_get(
+		"https://api.ivr.fi/v2/twitch/badges/channel?login=" +
+			url_encode(to_lower_ascii(state.cfg.channel)),
+		{}, state.cfg.proxy);
+	if (!response.ok || response.body.empty())
+		return 0;
+
+	json::Value root;
+	if (!json::parse(response.body, root) || !root.is_array())
+		return 0;
+
+	size_t registered = 0;
+	for (const json::Value &set : root.array) {
+		const std::string set_id = set.get_string("set_id");
+		if (set_id.empty())
+			continue;
+		const json::Value &versions = set["versions"];
+		for (const json::Value &version : versions.array) {
+			const std::string version_id = version.get_string("id");
+			if (version_id.empty())
+				continue;
+			std::string url = version.get_string("image_url_2x");
+			if (url.empty())
+				url = version.get_string("image_url_1x");
+			if (url.empty())
+				continue;
+			state.images->register_image("badge:" + set_id + "/" + version_id, url);
+			++registered;
+		}
+	}
+	return registered;
+}
+
 void TwitchWorker::load_metadata(State &state)
 {
 	// The numeric channel id arrives in the IRC "room-id" tag right after JOIN.
@@ -482,24 +522,35 @@ void TwitchWorker::load_metadata(State &state)
 	else
 		blog(LOG_INFO, "[chat-overlay] channel id %s", id.c_str());
 
-	register_known_badges(state);
+	// Badge sources, best-effort without any user credentials:
+	//   1. ivr.fi mirror (global + channel, merged)
+	//   2. legacy badges.twitch.tv
+	//   3. Helix, only when Client-ID + OAuth are configured
+	//   4. built-in global badges as the last resort
+	size_t badges = load_badges_ivr(state);
+	if (badges > 0)
+		blog(LOG_INFO, "[chat-overlay] badges from ivr.fi mirror: %zu", badges);
 
-	const size_t public_badges = load_badges_public(state, id);
-	if (public_badges > 0) {
-		blog(LOG_INFO, "[chat-overlay] badges from public API: %zu", public_badges);
-	} else if (has_credentials) {
-		blog(LOG_INFO, "[chat-overlay] public badge API unavailable, falling back to Helix");
-		load_badges(state, id);
-	} else {
+	if (badges == 0) {
+		badges = load_badges_public(state, id);
+		if (badges > 0)
+			blog(LOG_INFO, "[chat-overlay] badges from public API: %zu", badges);
+	}
+
+	if (badges == 0 && has_credentials)
+		badges = load_badges(state, id);
+
+	if (badges == 0) {
+		register_known_badges(state);
 		blog(LOG_WARNING,
-		     "[chat-overlay] public badge API unavailable: only built-in global badges "
-		     "(mod/vip/prime/partner/staff) will be shown. Add Client-ID/OAuth for all badges.");
+		     "[chat-overlay] badge APIs unavailable: only built-in global badges "
+		     "(mod/vip/prime/partner/staff) will be shown");
 	}
 
 	load_emotes(state, id);
 }
 
-void TwitchWorker::load_badges(State &state, const std::string &broadcaster_id)
+size_t TwitchWorker::load_badges(State &state, const std::string &broadcaster_id)
 {
 	size_t registered = 0;
 	auto consume = [&state, &registered](const std::string &body) {
@@ -530,7 +581,8 @@ void TwitchWorker::load_badges(State &state, const std::string &broadcaster_id)
 	consume(helix_get(state, "/chat/badges/global"));
 	if (!broadcaster_id.empty())
 		consume(helix_get(state, "/chat/badges?broadcaster_id=" + broadcaster_id));
-	blog(LOG_INFO, "[chat-overlay] badges registered: %zu", registered);
+	blog(LOG_INFO, "[chat-overlay] badges from Helix: %zu", registered);
+	return registered;
 }
 
 void TwitchWorker::load_emotes(State &state, const std::string &broadcaster_id)
