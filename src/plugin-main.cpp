@@ -7,6 +7,7 @@
 #include "render.hpp"
 #include "theme.hpp"
 #include "twitch.hpp"
+#include "widget.hpp"
 
 #include <cmath>
 #include <fstream>
@@ -40,6 +41,8 @@ Config config_from_settings(obs_data_t *settings)
 	cfg.proxy = trim(obs_data_get_string(settings, "proxy"));
 	cfg.debug_log = obs_data_get_bool(settings, "debug_log");
 	cfg.demo_mode = obs_data_get_bool(settings, "demo_mode");
+	cfg.widget_mode = obs_data_get_bool(settings, "widget_mode");
+	cfg.widget_dir = trim(obs_data_get_string(settings, "widget_dir"));
 
 	cfg.width = (uint32_t)obs_data_get_int(settings, "width");
 	cfg.height = (uint32_t)obs_data_get_int(settings, "height");
@@ -103,6 +106,7 @@ struct ChatOverlay {
 	std::shared_ptr<ImageCache> images;
 	std::unique_ptr<ChatRenderer> renderer;
 	std::unique_ptr<TwitchWorker> worker;
+	std::unique_ptr<WidgetHost> widget;
 
 	// Guards the renderer and the worker: update() runs on the UI thread while
 	// video_tick()/video_render() run on the graphics thread.
@@ -346,6 +350,7 @@ void chat_overlay_destroy(void *data)
 	{
 		std::lock_guard<std::mutex> lock(ctx->mutex);
 		worker = std::move(ctx->worker);
+		ctx->widget.reset();
 		ctx->renderer.reset();
 	}
 	if (worker)
@@ -380,6 +385,7 @@ void chat_overlay_update(void *data, obs_data_t *settings)
 			ctx->renderer->configure(cfg);
 
 		const bool proxy_changed = cfg.proxy != previous.proxy;
+		const bool channel_changed = cfg.channel != previous.channel;
 		const bool connection_changed = cfg.channel != previous.channel ||
 						cfg.oauth != previous.oauth ||
 						cfg.username != previous.username ||
@@ -397,6 +403,16 @@ void chat_overlay_update(void *data, obs_data_t *settings)
 			ctx->images->set_debug(cfg.debug_log);
 			if (ctx->renderer)
 				ctx->renderer->set_images(ctx->images);
+			restart = true;
+		}
+
+		if (channel_changed) {
+			// Badge and emote art is per-channel: drop everything cached for the
+			// previous channel and start with a clean renderer.
+			ctx->images->clear();
+			if (ctx->emotes)
+				ctx->emotes->clear();
+			ctx->renderer.reset(new ChatRenderer(ctx->cfg, *ctx->emotes, ctx->images));
 			restart = true;
 		}
 
@@ -420,6 +436,31 @@ void chat_overlay_update(void *data, obs_data_t *settings)
 				ctx->images->register_image(
 					"badge:premium/1",
 					"https://static-cdn.jtvnw.net/badges/v1/bbbe0db0-a598-423e-86d0-f9fb98ca1933/2");
+			}
+		}
+
+		const bool widget_changed = cfg.widget_mode != previous.widget_mode ||
+					    cfg.widget_dir != previous.widget_dir ||
+					    cfg.width != previous.width || cfg.height != previous.height;
+
+		if (widget_changed) {
+			if (ctx->widget) {
+				ctx->widget->stop();
+				ctx->widget.reset();
+			}
+			if (cfg.widget_mode) {
+				std::string error;
+				auto host = std::make_unique<WidgetHost>();
+				if (host->start(cfg.widget_dir, cfg.width, cfg.height, &error)) {
+					ctx->widget = std::move(host);
+					blog(LOG_INFO, "[chat-overlay] widget mode enabled: %s",
+					     cfg.widget_dir.c_str());
+				} else {
+					blog(LOG_WARNING,
+					     "[chat-overlay] widget mode unavailable, using the native "
+					     "renderer: %s",
+					     error.c_str());
+				}
 			}
 		}
 
@@ -449,14 +490,20 @@ void chat_overlay_tick(void *data, float seconds)
 
 	std::lock_guard<std::mutex> lock(ctx->mutex);
 
+	const bool widget_active = ctx->widget && ctx->widget->active();
+
 	if (ctx->cfg.demo_mode) {
 		if (now >= ctx->next_demo_time) {
 			ctx->next_demo_time = now + 1.5;
 			ChatMessage msg = make_demo_message(ctx->demo_index++);
 			msg.seq = ctx->demo_index;
 			msg.recv_time = now;
-			if (moderation_allows(ctx->cfg, msg))
-				ctx->renderer->add(msg);
+			if (moderation_allows(ctx->cfg, msg)) {
+				if (widget_active)
+					ctx->widget->feed(msg, ctx->cfg.channel, ctx->cfg);
+				else
+					ctx->renderer->add(msg);
+			}
 		}
 	} else if (ctx->worker) {
 		std::vector<ChatMessage> incoming;
@@ -464,11 +511,17 @@ void chat_overlay_tick(void *data, float seconds)
 		for (ChatMessage &msg : incoming) {
 			if (!moderation_allows(ctx->cfg, msg))
 				continue;
-			ctx->renderer->add(msg);
+			if (widget_active)
+				ctx->widget->feed(msg, ctx->cfg.channel, ctx->cfg);
+			else
+				ctx->renderer->add(msg);
 		}
 	}
 
-	ctx->renderer->tick(now);
+	if (widget_active)
+		ctx->widget->poll();
+	else
+		ctx->renderer->tick(now);
 }
 
 // Draws the prepared panel texture. Because the source uses
@@ -507,6 +560,10 @@ void chat_overlay_render(void *data, gs_effect_t *effect)
 		return;
 
 	std::lock_guard<std::mutex> lock(ctx->mutex);
+	if (ctx->widget && ctx->widget->active()) {
+		ctx->widget->render();
+		return;
+	}
 	if (!ctx->renderer || ctx->renderer->empty())
 		return;
 
@@ -650,6 +707,8 @@ void config_defaults(obs_data_t *settings)
 	obs_data_set_default_string(settings, "theme_css", "");
 
 	obs_data_set_default_bool(settings, "demo_mode", false);
+	obs_data_set_default_bool(settings, "widget_mode", false);
+	obs_data_set_default_string(settings, "widget_dir", "");
 }
 
 obs_properties_t *chat_overlay_properties(void *data)
@@ -707,6 +766,25 @@ obs_properties_t *chat_overlay_properties(void *data)
 		"Подробности в docs/THEMES.md.",
 		OBS_TEXT_INFO);
 	obs_properties_add_group(props, "theme_group", "Тема и импорт", OBS_GROUP_NORMAL, theme);
+
+	obs_properties_t *widget = obs_properties_create();
+	obs_properties_add_bool(widget, "widget_mode",
+				"Запускать HTML/CSS/JS виджет (StreamElements)");
+	obs_properties_add_path(
+		widget, "widget_dir", "Папка виджета (html/css/js/fields/data)", OBS_PATH_DIRECTORY,
+		nullptr, nullptr);
+	obs_properties_add_text(
+		widget, "widget_help",
+		"Включите режим и укажите папку с файлами виджета из StreamElements "
+		"(html.txt, css.txt, js.txt, fields.txt, data.txt). Плагин соберёт из них "
+		"страницу, откроет её во встроенном браузере OBS и будет передавать "
+		"сообщения чата событиями onWidgetLoad / onEventReceived — виджет работает "
+		"как в StreamElements. Настройки «Внешнего вида» и модерация при этом не "
+		"применяются: вид оформляется самим виджетом. Нужен установленный "
+		"obs-browser (идёт с OBS).",
+		OBS_TEXT_INFO);
+	obs_properties_add_group(props, "widget_group", "Виджет (HTML/CSS/JS)", OBS_GROUP_NORMAL,
+				 widget);
 
 	obs_properties_t *diagnostics = obs_properties_create();
 	obs_properties_add_bool(diagnostics, "demo_mode",

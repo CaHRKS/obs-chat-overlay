@@ -1,4 +1,4 @@
-﻿#ifndef WIN32_LEAN_AND_MEAN
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #ifndef _WIN32_WINNT
@@ -108,6 +108,7 @@ struct ChatRenderer::Impl {
 	std::map<std::string, ComPtr<ID2D1Bitmap>> bitmaps;
 	std::set<std::string> pending;
 	std::set<std::string> missing;
+	std::set<std::string> waiting; // keys whose URL is not known yet
 
 	bool gfx_ready = false;
 	bool layout_dirty = true;
@@ -247,7 +248,12 @@ struct ChatRenderer::Impl {
 			width = height * (float)known->second.width / (float)known->second.height;
 		else if (images->failed(key) || missing.count(key) > 0)
 			return; // broken asset: render nothing, keep the slot zero-width
-		else if (!pending.count(key)) {
+		else if (!images->has_url(key)) {
+			// The URL is not known yet (badge/emote metadata is still loading).
+			// Remember the key so the panel is re-laid out as soon as it appears.
+			waiting.insert(key);
+			return;
+		} else if (!pending.count(key)) {
 			images->request(key);
 			pending.insert(key);
 		}
@@ -709,6 +715,24 @@ struct ChatRenderer::Impl {
 	bool drain_images()
 	{
 		bool added = false;
+
+		// Promote keys whose URL became known after the previous layout pass
+		// (for example when channel badges finish loading a few seconds later).
+		for (auto it = waiting.begin(); it != waiting.end();) {
+			if (images->failed(*it)) {
+				missing.insert(*it);
+				it = waiting.erase(it);
+				added = true;
+				continue;
+			}
+			if (images->has_url(*it)) {
+				it = waiting.erase(it);
+				added = true;
+				continue;
+			}
+			++it;
+		}
+
 		for (auto it = pending.begin(); it != pending.end();) {
 			DecodedImage image;
 			if (images->take(*it, image)) {
@@ -748,6 +772,7 @@ void ChatRenderer::set_images(std::shared_ptr<ImageCache> images)
 	impl_->images = std::move(images);
 	impl_->pending.clear();
 	impl_->missing.clear();
+	impl_->waiting.clear();
 	impl_->layout_dirty = true;
 	impl_->draw_dirty = true;
 }

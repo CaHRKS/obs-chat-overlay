@@ -43,6 +43,9 @@ public:
 	bool failed(const std::string &key) const;
 	// Logs failed downloads (useful when diagnosing emotes/badges).
 	void set_debug(bool enabled);
+	// Forgets every registered URL and decoded image (used when the channel
+	// changes, so badge/emote art of the previous channel is not reused).
+	void clear();
 
 	void stop();
 

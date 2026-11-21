@@ -209,6 +209,13 @@ void ImageCache::set_debug(bool enabled)
 	state_->debug = enabled;
 }
 
+void ImageCache::clear()
+{
+	std::lock_guard<std::mutex> lock(state_->mutex);
+	state_->entries.clear();
+	state_->ready.clear();
+}
+
 void ImageCache::worker_main(std::shared_ptr<State> state)
 {
 	state->active.fetch_add(1);

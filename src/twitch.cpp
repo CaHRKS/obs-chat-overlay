@@ -410,6 +410,9 @@ void TwitchWorker::register_known_badges(State &state)
 // Returns the number of registered badge versions.
 size_t TwitchWorker::load_badges_public(State &state, const std::string &room_id_value)
 {
+	if (state.stop.load())
+		return 0;
+
 	size_t registered = 0;
 
 	const auto consume = [&state, &registered](const std::string &body) {
@@ -464,6 +467,10 @@ size_t TwitchWorker::load_badges_ivr(State &state)
 			url_encode(to_lower_ascii(state.cfg.channel)),
 		{}, state.cfg.proxy);
 	if (!response.ok || response.body.empty())
+		return 0;
+	// A newer channel may have replaced this worker while the request was in
+	// flight; dropping the result keeps the new channel's badges intact.
+	if (state.stop.load())
 		return 0;
 
 	json::Value root;
@@ -522,11 +529,15 @@ void TwitchWorker::load_metadata(State &state)
 	else
 		blog(LOG_INFO, "[chat-overlay] channel id %s", id.c_str());
 
+	// Built-in global badges are the canonical art for mod/vip/prime/partner/
+	// staff, so they are always registered first as a baseline; the remote
+	// sources below only add channel-specific sets.
+	register_known_badges(state);
+
 	// Badge sources, best-effort without any user credentials:
 	//   1. ivr.fi mirror (global + channel, merged)
 	//   2. legacy badges.twitch.tv
 	//   3. Helix, only when Client-ID + OAuth are configured
-	//   4. built-in global badges as the last resort
 	size_t badges = load_badges_ivr(state);
 	if (badges > 0)
 		blog(LOG_INFO, "[chat-overlay] badges from ivr.fi mirror: %zu", badges);
@@ -540,18 +551,19 @@ void TwitchWorker::load_metadata(State &state)
 	if (badges == 0 && has_credentials)
 		badges = load_badges(state, id);
 
-	if (badges == 0) {
-		register_known_badges(state);
+	if (badges == 0)
 		blog(LOG_WARNING,
 		     "[chat-overlay] badge APIs unavailable: only built-in global badges "
 		     "(mod/vip/prime/partner/staff) will be shown");
-	}
 
 	load_emotes(state, id);
 }
 
 size_t TwitchWorker::load_badges(State &state, const std::string &broadcaster_id)
 {
+	if (state.stop.load())
+		return 0;
+
 	size_t registered = 0;
 	auto consume = [&state, &registered](const std::string &body) {
 		json::Value root;
@@ -587,6 +599,9 @@ size_t TwitchWorker::load_badges(State &state, const std::string &broadcaster_id
 
 void TwitchWorker::load_emotes(State &state, const std::string &broadcaster_id)
 {
+	if (state.stop.load())
+		return;
+
 	std::vector<EmoteEntry> global_entries;
 	std::vector<EmoteEntry> channel_entries;
 	const std::string &proxy = state.cfg.proxy;
@@ -681,6 +696,10 @@ void TwitchWorker::load_emotes(State &state, const std::string &broadcaster_id)
 			}
 		}
 	}
+
+	// The channel may have been switched while the requests were running.
+	if (state.stop.load())
+		return;
 
 	state.emotes->set_global(std::move(global_entries));
 	state.emotes->set_channel(std::move(channel_entries));

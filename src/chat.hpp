@@ -105,6 +105,10 @@ struct Config {
 	std::string proxy; // HTTP proxy "host:port", empty for a direct connection
 	bool debug_log = false; // log raw IRC traffic and HTTP failures
 	bool demo_mode = false; // inject local test messages instead of connecting
+
+	// Widget mode: run a StreamElements HTML/CSS/JS widget in a browser source
+	bool widget_mode = false;
+	std::string widget_dir;
 };
 
 // ---------------------------------------------------------------------------
