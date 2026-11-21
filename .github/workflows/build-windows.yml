@@ -1,0 +1,69 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-x64:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      # The build scaffolding (cmake modules, presets, packaging helpers) comes
+      # from the official OBS plugin template pinned to a specific commit, so it
+      # does not have to be vendored into this repository.
+      - name: Fetch OBS plugin build scaffolding
+        shell: pwsh
+        run: |
+          $sha = "3e7d7ac3b5342cd7d9b88890b9c70b472d1520fc"
+          git clone --quiet https://github.com/obsproject/obs-plugintemplate.git _scaffolding
+          git -C _scaffolding checkout --quiet $sha
+          Copy-Item -Recurse -Force _scaffolding/cmake .
+          Copy-Item -Force _scaffolding/CMakePresets.json .
+
+      - name: Configure
+        run: cmake --preset windows-ci-x64
+
+      - name: Build
+        run: cmake --build build_x64 --config RelWithDebInfo --parallel
+
+      - name: Install
+        run: cmake --install build_x64 --prefix release/RelWithDebInfo --config RelWithDebInfo
+
+      # The template installs into its own layout; rebuild the classic OBS layout
+      # (obs-plugins/64bit + data/obs-plugins/<name>) which OBS 28-33 load.
+      # The stage directory itself is uploaded, so the downloaded artifact is
+      # ready to be extracted straight into the OBS folder.
+      - name: Package
+        shell: pwsh
+        run: |
+          $prefix = "release/RelWithDebInfo"
+          Get-ChildItem -Recurse $prefix | Select-Object FullName
+
+          $dll = Get-ChildItem -Path $prefix -Recurse -Filter obs-chat-overlay.dll | Select-Object -First 1
+          if (-not $dll) { throw "obs-chat-overlay.dll was not produced" }
+
+          $stage = "stage"
+          Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force "$stage/obs-plugins/64bit" | Out-Null
+          Copy-Item $dll.FullName "$stage/obs-plugins/64bit/"
+
+          $locale = Get-ChildItem -Path $prefix -Recurse -Directory -Filter locale | Select-Object -First 1
+          if ($locale) {
+            $dataRoot = $locale.Parent.FullName
+            $destination = "$stage/data/obs-plugins/obs-chat-overlay"
+            New-Item -ItemType Directory -Force $destination | Out-Null
+            Copy-Item -Path "$dataRoot/*" -Destination $destination -Recurse -Force
+          } else {
+            Write-Warning "locale directory not found, plugin data will be missing"
+          }
+
+          Get-ChildItem -Recurse $stage | Select-Object FullName
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: obs-chat-overlay-windows-x64
+          path: stage
+          if-no-files-found: error
