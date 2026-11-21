@@ -45,12 +45,15 @@ public:
 
 	bool start(obs_source *parent, const std::string &dir, EmoteRegistry *emotes,
 		   ImageCache *images, const std::map<std::string, std::string> &overrides,
-		   uint32_t width, uint32_t height, int fps, std::string *error);
+		   uint32_t width, uint32_t height, int fps, bool light_mode, bool glow,
+		   std::string *error);
 	void stop();
 	// Field values edited in the OBS properties dialog.
 	void set_overrides(const std::map<std::string, std::string> &overrides);
 	// Browser frame rate; lowering it is the cheapest way to cut CPU usage.
 	void set_fps(int fps);
+	// Cheap rendering: no infinite decorative animations, no drop-shadow filters.
+	void set_visual_options(bool light_mode, bool glow);
 	bool active() const { return source_ != nullptr; }
 	// True once the page has connected to the local server (CEF is up).
 	bool ready() const;
@@ -84,6 +87,8 @@ private:
 	uint32_t width_ = 0;
 	uint32_t height_ = 0;
 	int fps_ = 15;
+	bool light_mode_ = true;
+	bool glow_ = false;
 	int last_viewers_ = -1;
 	double next_poll_ = 0.0;
 	double started_at_ = 0.0;

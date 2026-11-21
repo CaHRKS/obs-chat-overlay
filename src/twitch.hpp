@@ -45,8 +45,7 @@ private:
 	static bool connect_irc(State &state, std::string &error);
 	static void read_loop(State &state);
 	static void load_metadata(State &state);
-	// Emote cache and channel id resolution that do not depend on IRC/OAuth.
-	static void apply_cached_emotes(State &state);
+	// Channel id resolution that does not depend on IRC/OAuth.
 	static std::string resolve_channel_id_public(State &state);
 	static size_t load_badges_ivr(State &state);
 	static size_t load_badges_public(State &state, const std::string &room_id);

@@ -29,7 +29,7 @@ namespace {
 constexpr const char *kSourceId = "obs_chat_overlay";
 // Keep in sync with buildspec.json; printed on load so the log always shows which
 // build is installed.
-constexpr const char *CHAT_OVERLAY_VERSION = "1.4.0";
+constexpr const char *CHAT_OVERLAY_VERSION = "1.5.0";
 
 void chat_overlay_update(void *data, obs_data_t *settings);
 
@@ -54,6 +54,8 @@ Config config_from_settings(obs_data_t *settings)
 		cfg.widget_fps = 5;
 	if (cfg.widget_fps > 60)
 		cfg.widget_fps = 60;
+	cfg.widget_light_mode = obs_data_get_bool(settings, "widget_light_mode");
+	cfg.widget_glow = obs_data_get_bool(settings, "widget_glow");
 
 	cfg.width = (uint32_t)obs_data_get_int(settings, "width");
 	cfg.height = (uint32_t)obs_data_get_int(settings, "height");
@@ -603,6 +605,10 @@ void chat_overlay_update(void *data, obs_data_t *settings)
 				ctx->widget->set_size(cfg.width, cfg.height);
 			if (cfg.widget_fps != previous.widget_fps)
 				ctx->widget->set_fps(cfg.widget_fps);
+			if (cfg.widget_light_mode != previous.widget_light_mode ||
+			    cfg.widget_glow != previous.widget_glow)
+				ctx->widget->set_visual_options(cfg.widget_light_mode,
+								cfg.widget_glow);
 			ctx->widget->set_overrides(overrides);
 		}
 
@@ -639,7 +645,8 @@ void chat_overlay_tick(void *data, float seconds)
 		auto host = std::make_unique<WidgetHost>();
 		if (host->start(ctx->source, ctx->cfg.widget_dir, ctx->emotes.get(),
 				ctx->images.get(), ctx->pending_overrides, ctx->cfg.width,
-				ctx->cfg.height, ctx->cfg.widget_fps, &error)) {
+				ctx->cfg.height, ctx->cfg.widget_fps, ctx->cfg.widget_light_mode,
+				ctx->cfg.widget_glow, &error)) {
 			ctx->widget = std::move(host);
 			widget_mark_active();
 			blog(LOG_INFO, "[chat-overlay] widget mode enabled: %s",
@@ -898,6 +905,8 @@ void config_defaults(obs_data_t *settings)
 	obs_data_set_default_string(settings, "widget_dir", "");
 	obs_data_set_default_bool(settings, "twitch_nick_colors", true);
 	obs_data_set_default_int(settings, "widget_fps", 15);
+	obs_data_set_default_bool(settings, "widget_light_mode", true);
+	obs_data_set_default_bool(settings, "widget_glow", false);
 	obs_data_set_default_int(settings, "widget_hide_after", 60);
 	obs_data_set_default_int(settings, "widget_messages_limit", 15);
 }
@@ -970,6 +979,11 @@ obs_properties_t *chat_overlay_properties(void *data)
 	obs_properties_add_int(
 		widget, "widget_fps",
 		"Частота кадров виджета (меньше — меньше нагрузка на CPU)", 5, 60, 1);
+	obs_properties_add_bool(
+		widget, "widget_light_mode",
+		"Экономить CPU: без постоянных анимаций (цветы, блики, пульсация)");
+	obs_properties_add_bool(widget, "widget_glow",
+				"Свечение элементов (drop-shadow, заметно грузит CPU)");
 	obs_properties_add_int(widget, "widget_hide_after",
 			       "Скрывать сообщение через, сек (0 = как в виджете)", 0, 3600, 5);
 	obs_properties_add_int(widget, "widget_messages_limit",

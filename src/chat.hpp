@@ -116,6 +116,9 @@ struct Config {
 	// Frames per second the embedded browser renders at. Lower values save a lot
 	// of CPU on weak machines.
 	int widget_fps = 15;
+	// Rendering economy: disable infinite decorative animations, skip glow filters.
+	bool widget_light_mode = true;
+	bool widget_glow = false;
 };
 
 // ---------------------------------------------------------------------------

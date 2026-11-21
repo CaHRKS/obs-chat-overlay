@@ -306,8 +306,10 @@ std::string build_message_event(const ChatMessage &msg, const std::string &chann
 		const std::string name = slice_by_cp(msg.text, span.start_cp, span.end_cp);
 		if (name.empty())
 			continue;
+		// The widget uses urls[2]; keeping it at 2x (not 4x) halves the decoded
+		// texture size for a 51px element, which is cheaper to paint.
 		push_emote(name, span.id, "twitch", twitch_emote_url(span.id, "1.0"),
-			   twitch_emote_url(span.id, "2.0"), twitch_emote_url(span.id, "3.0"));
+			   twitch_emote_url(span.id, "2.0"), twitch_emote_url(span.id, "2.0"));
 	}
 
 	// Third-party emotes (BTTV / 7TV) are not announced by Twitch, so the words
@@ -330,11 +332,11 @@ std::string build_message_event(const ChatMessage &msg, const std::string &chann
 			if (key.rfind("bttv:", 0) == 0) {
 				const std::string id = key.substr(5);
 				push_emote(word, id, "bttv", bttv_emote_url(id, 1),
-					   bttv_emote_url(id, 2), bttv_emote_url(id, 3));
+					   bttv_emote_url(id, 2), bttv_emote_url(id, 2));
 			} else if (key.rfind("7tv:", 0) == 0) {
 				const std::string id = key.substr(4);
 				push_emote(word, id, "7tv", seventv_emote_url(id, 1),
-					   seventv_emote_url(id, 2), seventv_emote_url(id, 3));
+					   seventv_emote_url(id, 2), seventv_emote_url(id, 2));
 			}
 		}
 	}
@@ -568,7 +570,7 @@ std::string build_page(const std::string &html, const std::string &css, const st
 // CSS patched into the browser source through its "css" setting. Applying field
 // edits this way avoids reloading (and re-creating) the CEF browser, which used
 // to crash on rapid property changes.
-std::string build_css_override(const FieldValues &values)
+std::string build_css_override(const FieldValues &values, bool light_mode, bool glow)
 {
 	const auto get = [&values](const char *key) {
 		const auto it = values.values.find(key);
@@ -583,9 +585,13 @@ std::string build_css_override(const FieldValues &values)
 	css += ".message{background:" + get("backgroundcol") + " !important;}";
 	css += ".flower path:nth-of-type(1){fill:" + get("flowercol") + " !important;}";
 	css += ".divider path:nth-of-type(1){fill:" + get("dividercol") + " !important;}";
-	css += ".flower,.divider,.divider_container,.cat,.eyes,.heart,.tilda{filter:drop-shadow(0 0 "
-	       "9.9px " +
-	       get("shadowelemcol") + ") !important;}";
+	// The design itself applies drop-shadow() to these elements, and a filter is a
+	// per-frame raster cost for everything it touches. When glow is disabled the
+	// filter is removed instead of being (re)applied.
+	if (!glow) {
+		css += ".flower,.divider,.divider_container,.cat,.eyes,.heart,.tilda{"
+		       "filter:none !important;}";
+	}
 	// The fallback inserter uses plain <img> elements for emotes. The widget's own
 	// fallback path writes inline "height:auto" into a div, which overrides its
 	// stylesheet and leaves a zero-height element; !important restores the size.
@@ -593,6 +599,17 @@ std::string build_css_override(const FieldValues &values)
 	       "background-size:contain !important;background-repeat:no-repeat !important;"
 	       "background-position:center !important;vertical-align:middle !important;"
 	       "object-fit:contain !important;margin-right:7px !important;}";
+	// Layout/paint containment: keeps a new message from re-laying out the whole
+	// panel.
+	css += ".msg{contain:layout paint style !important;}";
+	css += ".main-container{contain:layout paint !important;}";
+	if (light_mode) {
+		// The design animates flowers/dividers forever (sway/blink/pulse). Those
+		// animations keep CEF repainting non-stop; message fade in/out is kept.
+		css += ".flower,.flower svg,.flower path,.divider,.divider path,"
+		       ".divider_container,.cat,.eyes,.heart,.tilda{animation:none !important;"
+		       "transition:none !important;}";
+	}
 	return css;
 }
 
@@ -697,7 +714,8 @@ WidgetHost::~WidgetHost()
 
 bool WidgetHost::start(obs_source *parent, const std::string &dir, EmoteRegistry *emotes,
 		       ImageCache *images, const std::map<std::string, std::string> &overrides,
-		       uint32_t width, uint32_t height, int fps, std::string *error)
+		       uint32_t width, uint32_t height, int fps, bool light_mode, bool glow,
+		       std::string *error)
 {
 	stop();
 
@@ -708,6 +726,8 @@ bool WidgetHost::start(obs_source *parent, const std::string &dir, EmoteRegistry
 	dir_ = dir;
 	width_ = width;
 	height_ = height;
+	light_mode_ = light_mode;
+	glow_ = glow;
 	fps_ = fps < 5 ? 5 : (fps > 60 ? 60 : fps);
 
 	if (dir_.empty()) {
@@ -791,7 +811,7 @@ void WidgetHost::set_overrides(const std::map<std::string, std::string> &overrid
 	// Rebuild the page and navigate to a new URL: this guarantees the edited
 	// colours are visible (obs-browser may only apply the "css" property on
 	// load). A navigation is safe — the browser source itself is not re-created.
-	css_ = build_css_override(resolved);
+	css_ = build_css_override(resolved, light_mode_, glow_);
 	rebuild(nullptr);
 	blog(LOG_INFO, "[chat-overlay] widget fields updated (%zu overrides)", overrides_.size());
 }
@@ -807,6 +827,16 @@ void WidgetHost::set_fps(int fps)
 	fps_ = fps;
 	if (source_)
 		apply_size();
+}
+
+void WidgetHost::set_visual_options(bool light_mode, bool glow)
+{
+	if (light_mode == light_mode_ && glow == glow_)
+		return;
+	light_mode_ = light_mode;
+	glow_ = glow;
+	if (source_)
+		rebuild(nullptr);
 }
 
 void WidgetHost::set_size(uint32_t width, uint32_t height)
@@ -876,7 +906,7 @@ bool WidgetHost::rebuild(std::string *error)
 		build_page(html, css, js, fields, data.empty() ? "{}" : data, overrides_);
 	const FieldValues resolved =
 		collect_fields(fields, data.empty() ? "{}" : data, overrides_);
-	css_ = build_css_override(resolved);
+	css_ = build_css_override(resolved, light_mode_, glow_);
 	server_.set_page(page);
 	stamp_ = directory_stamp(dir_);
 	// The URL must change on every rebuild, otherwise obs_source_update() keeps
