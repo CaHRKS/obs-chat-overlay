@@ -7,6 +7,8 @@
 
 #include "httpd.hpp"
 
+#include <obs-module.h>
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -180,16 +182,18 @@ void HttpServer::handle_connection(unsigned long long handle)
 {
 	const SOCKET client = (SOCKET)handle;
 
-	// Read the request head (we only need the request line).
+	// Read the whole request head. Closing a socket while headers are still
+	// unread makes Windows send RST instead of FIN, and the browser reports
+	// ERR_CONNECTION_RESET even though a response was written.
 	std::string request;
-	char buffer[512];
+	char buffer[1024];
 	while (request.size() < kMaxRequest) {
+		if (request.find("\r\n\r\n") != std::string::npos)
+			break;
 		const int received = recv(client, buffer, sizeof(buffer), 0);
 		if (received <= 0)
 			break;
 		request.append(buffer, (size_t)received);
-		if (request.find("\r\n") != std::string::npos)
-			break;
 	}
 
 	if (request.empty()) {
@@ -267,6 +271,8 @@ void HttpServer::handle_connection(unsigned long long handle)
 		}
 		std::lock_guard<std::mutex> lock(mutex_);
 		clients_.push_back(handle);
+		blog(LOG_DEBUG, "[chat-overlay] httpd: event stream client connected (~%zu total)",
+		     clients_.size());
 		return;
 	}
 
@@ -286,5 +292,7 @@ void HttpServer::handle_connection(unsigned long long handle)
 				     "Content-Length: " +
 				     std::to_string(body.size()) + "\r\n\r\n" + body;
 	send_string(client, response);
+	shutdown(client, SD_SEND);
 	close_socket(handle);
+	blog(LOG_DEBUG, "[chat-overlay] httpd: served %s (%zu bytes)", path.c_str(), body.size());
 }
