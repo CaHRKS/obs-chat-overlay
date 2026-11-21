@@ -491,18 +491,9 @@ void chat_overlay_tick(void *data, float seconds)
 
 	std::lock_guard<std::mutex> lock(ctx->mutex);
 
-	if (ctx->widget && ctx->widget->active()) {
-		ctx->widget->tick(seconds);
-		if (ctx->widget->failed()) {
-			blog(LOG_WARNING,
-			     "[chat-overlay] widget is not responding, switching back to the native "
-			     "renderer");
-			ctx->widget->stop();
-			ctx->widget.reset();
-		}
-	}
-
 	const bool widget_active = ctx->widget && ctx->widget->active();
+	if (widget_active)
+		ctx->widget->tick(seconds);
 
 	if (ctx->cfg.demo_mode) {
 		if (now >= ctx->next_demo_time) {
@@ -511,10 +502,11 @@ void chat_overlay_tick(void *data, float seconds)
 			msg.seq = ctx->demo_index;
 			msg.recv_time = now;
 			if (moderation_allows(ctx->cfg, msg)) {
+				// Feed both paths: the native renderer covers the moment while the
+				// embedded browser is still starting up.
+				ctx->renderer->add(msg);
 				if (widget_active)
 					ctx->widget->feed(msg, ctx->cfg.channel, ctx->cfg);
-				else
-					ctx->renderer->add(msg);
 			}
 		}
 	} else if (ctx->worker) {
@@ -523,17 +515,15 @@ void chat_overlay_tick(void *data, float seconds)
 		for (ChatMessage &msg : incoming) {
 			if (!moderation_allows(ctx->cfg, msg))
 				continue;
+			ctx->renderer->add(msg);
 			if (widget_active)
 				ctx->widget->feed(msg, ctx->cfg.channel, ctx->cfg);
-			else
-				ctx->renderer->add(msg);
 		}
 	}
 
+	ctx->renderer->tick(now);
 	if (widget_active)
 		ctx->widget->poll();
-	else
-		ctx->renderer->tick(now);
 }
 
 // Draws the prepared panel texture. Because the source uses
@@ -572,7 +562,9 @@ void chat_overlay_render(void *data, gs_effect_t *effect)
 		return;
 
 	std::lock_guard<std::mutex> lock(ctx->mutex);
-	if (ctx->widget && ctx->widget->active()) {
+	// Render the widget only once its page has connected; before that the native
+	// renderer keeps the chat visible instead of a black rectangle.
+	if (ctx->widget && ctx->widget->ready()) {
 		ctx->widget->render();
 		return;
 	}

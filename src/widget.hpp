@@ -4,6 +4,7 @@
 #include "httpd.hpp"
 
 #include <cstdint>
+#include <deque>
 #include <string>
 
 struct obs_source;
@@ -25,6 +26,8 @@ public:
 		   ImageCache *images, uint32_t width, uint32_t height, std::string *error);
 	void stop();
 	bool active() const { return source_ != nullptr; }
+	// True once the page has connected to the local server (CEF is up).
+	bool ready() const;
 	obs_source *source() const { return source_; }
 
 	void set_size(uint32_t width, uint32_t height);
@@ -57,4 +60,5 @@ private:
 	double next_poll_ = 0.0;
 	double started_at_ = 0.0;
 	bool warned_ = false;
+	std::deque<std::string> backlog_; // events sent before the page connected
 };

@@ -496,6 +496,11 @@ bool WidgetHost::start(obs_source *parent, const std::string &dir, EmoteRegistry
 	return true;
 }
 
+bool WidgetHost::ready() const
+{
+	return server_.client_count() > 0;
+}
+
 void WidgetHost::stop()
 {
 	if (source_) {
@@ -589,11 +594,14 @@ void WidgetHost::tick(float seconds)
 	if (started_at_ == 0.0)
 		started_at_ = now;
 
-	if (!warned_ && server_.client_count() == 0 && now - started_at_ > 8.0) {
+	const double elapsed = now - started_at_;
+	// CEFF cold start on slow machines can take tens of seconds: only warn, never
+	// tear the widget down (the server must stay alive for the page to load).
+	if (!warned_ && server_.client_count() == 0 && elapsed > 30.0) {
 		warned_ = true;
 		blog(LOG_WARNING,
-		     "[chat-overlay] widget page did not connect to %s: the embedded browser "
-		     "did not open the page (obs-browser/CEF issue?)",
+		     "[chat-overlay] widget page still has not connected to %s after 30 s; "
+		     "check whether the URL opens in a normal browser",
 		     url_.c_str());
 	}
 }
@@ -620,6 +628,13 @@ void WidgetHost::poll()
 	}
 
 	const int viewers = (int)server_.client_count();
+	if (viewers > 0 && last_viewers_ <= 0) {
+		// The page just connected: replay the messages that arrived while CEF was
+		// still starting, otherwise the first seconds of chat would be lost.
+		for (const std::string &event : backlog_)
+			server_.broadcast(event);
+		backlog_.clear();
+	}
 	if (viewers != last_viewers_) {
 		last_viewers_ = viewers;
 		blog(LOG_INFO, "[chat-overlay] widget viewers: %d", viewers);
@@ -631,7 +646,15 @@ void WidgetHost::feed(const ChatMessage &msg, const std::string &channel, const 
 	if (!source_)
 		return;
 	(void)cfg;
-	server_.broadcast(build_message_event(msg, channel, emotes_, images_));
+
+	const std::string event = build_message_event(msg, channel, emotes_, images_);
+	if (!ready()) {
+		backlog_.push_back(event);
+		if (backlog_.size() > 30)
+			backlog_.pop_front();
+		return;
+	}
+	server_.broadcast(event);
 }
 
 void WidgetHost::render()
