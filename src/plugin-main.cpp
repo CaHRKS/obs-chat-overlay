@@ -46,6 +46,11 @@ Config config_from_settings(obs_data_t *settings)
 	cfg.widget_mode = obs_data_get_bool(settings, "widget_mode");
 	cfg.widget_dir = trim(obs_data_get_string(settings, "widget_dir"));
 	cfg.twitch_nick_colors = obs_data_get_bool(settings, "twitch_nick_colors");
+	cfg.widget_fps = (int)obs_data_get_int(settings, "widget_fps");
+	if (cfg.widget_fps < 5)
+		cfg.widget_fps = 5;
+	if (cfg.widget_fps > 60)
+		cfg.widget_fps = 60;
 
 	cfg.width = (uint32_t)obs_data_get_int(settings, "width");
 	cfg.height = (uint32_t)obs_data_get_int(settings, "height");
@@ -556,6 +561,8 @@ void chat_overlay_update(void *data, obs_data_t *settings)
 			// Both avoid re-creating the CEF browser (which could crash it).
 			if (widget_size_changed)
 				ctx->widget->set_size(cfg.width, cfg.height);
+			if (cfg.widget_fps != previous.widget_fps)
+				ctx->widget->set_fps(cfg.widget_fps);
 			ctx->widget->set_overrides(overrides);
 		}
 
@@ -592,7 +599,7 @@ void chat_overlay_tick(void *data, float seconds)
 		auto host = std::make_unique<WidgetHost>();
 		if (host->start(ctx->source, ctx->cfg.widget_dir, ctx->emotes.get(),
 				ctx->images.get(), ctx->pending_overrides, ctx->cfg.width,
-				ctx->cfg.height, &error)) {
+				ctx->cfg.height, ctx->cfg.widget_fps, &error)) {
 			ctx->widget = std::move(host);
 			widget_mark_active();
 			blog(LOG_INFO, "[chat-overlay] widget mode enabled: %s",
@@ -608,6 +615,9 @@ void chat_overlay_tick(void *data, float seconds)
 	const bool widget_active = ctx->widget && ctx->widget->active();
 	if (widget_active)
 		ctx->widget->tick(seconds);
+	// While the widget is live it owns the screen, so the native renderer is not
+	// updated at all — text layout is the most expensive part of our own work.
+	const bool widget_ready = widget_active && ctx->widget->ready();
 
 	if (ctx->cfg.demo_mode) {
 		if (now >= ctx->next_demo_time) {
@@ -618,7 +628,8 @@ void chat_overlay_tick(void *data, float seconds)
 			if (moderation_allows(ctx->cfg, msg)) {
 				// Feed both paths: the native renderer covers the moment while the
 				// embedded browser is still starting up.
-				ctx->renderer->add(msg);
+				if (!widget_ready)
+					ctx->renderer->add(msg);
 				if (widget_active)
 					ctx->widget->feed(msg, ctx->cfg.channel, ctx->cfg);
 			}
@@ -629,13 +640,15 @@ void chat_overlay_tick(void *data, float seconds)
 		for (ChatMessage &msg : incoming) {
 			if (!moderation_allows(ctx->cfg, msg))
 				continue;
-			ctx->renderer->add(msg);
+			if (!widget_ready)
+				ctx->renderer->add(msg);
 			if (widget_active)
 				ctx->widget->feed(msg, ctx->cfg.channel, ctx->cfg);
 		}
 	}
 
-	ctx->renderer->tick(now);
+	if (!widget_ready)
+		ctx->renderer->tick(now);
 	if (widget_active)
 		ctx->widget->poll();
 
@@ -844,6 +857,7 @@ void config_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "widget_mode", false);
 	obs_data_set_default_string(settings, "widget_dir", "");
 	obs_data_set_default_bool(settings, "twitch_nick_colors", true);
+	obs_data_set_default_int(settings, "widget_fps", 15);
 }
 
 obs_properties_t *chat_overlay_properties(void *data)
@@ -911,6 +925,9 @@ obs_properties_t *chat_overlay_properties(void *data)
 	obs_properties_add_bool(
 		widget, "twitch_nick_colors",
 		"Красить ники цветом Twitch (выключить — использовать цвет из виджета)");
+	obs_properties_add_int(
+		widget, "widget_fps",
+		"Частота кадров виджета (меньше — меньше нагрузка на CPU)", 5, 60, 1);
 	obs_properties_add_text(
 		widget, "widget_help",
 		"Включите режим и укажите папку с файлами виджета из StreamElements "

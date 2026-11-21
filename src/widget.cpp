@@ -282,8 +282,8 @@ std::string build_message_event(const ChatMessage &msg, const std::string &chann
 			emotes += ",";
 		first = false;
 		emotes += "{\"name\":\"" + json_escape(name) + "\",\"id\":\"" + json_escape(id) +
-			  "\",\"type\":\"" + type + "\",\"gif\":false,\"urls\":{\"1\":\"" + u1 +
-			  "\",\"2\":\"" + u2 + "\",\"4\":\"" + u3 + "\"}}";
+			  "\",\"type\":\"" + type + "\",\"gif\":false,\"urls\":[\"" + u1 + "\",\"" +
+			  u2 + "\",\"" + u3 + "\"]}";
 	};
 
 	for (const EmoteSpan &span : msg.emotes) {
@@ -588,7 +588,7 @@ WidgetHost::~WidgetHost()
 
 bool WidgetHost::start(obs_source *parent, const std::string &dir, EmoteRegistry *emotes,
 		       ImageCache *images, const std::map<std::string, std::string> &overrides,
-		       uint32_t width, uint32_t height, std::string *error)
+		       uint32_t width, uint32_t height, int fps, std::string *error)
 {
 	stop();
 
@@ -599,6 +599,7 @@ bool WidgetHost::start(obs_source *parent, const std::string &dir, EmoteRegistry
 	dir_ = dir;
 	width_ = width;
 	height_ = height;
+	fps_ = fps < 5 ? 5 : (fps > 60 ? 60 : fps);
 
 	if (dir_.empty()) {
 		if (error)
@@ -686,6 +687,19 @@ void WidgetHost::set_overrides(const std::map<std::string, std::string> &overrid
 	blog(LOG_INFO, "[chat-overlay] widget fields updated (%zu overrides)", overrides_.size());
 }
 
+void WidgetHost::set_fps(int fps)
+{
+	if (fps < 5)
+		fps = 5;
+	if (fps > 60)
+		fps = 60;
+	if (fps == fps_)
+		return;
+	fps_ = fps;
+	if (source_)
+		apply_size();
+}
+
 void WidgetHost::set_size(uint32_t width, uint32_t height)
 {
 	if (width_ == width && height_ == height)
@@ -705,8 +719,10 @@ void WidgetHost::apply_size()
 	obs_data_set_bool(settings, "is_local_file", false);
 	obs_data_set_int(settings, "width", (long long)width_);
 	obs_data_set_int(settings, "height", (long long)height_);
-	obs_data_set_int(settings, "fps", 30);
-	obs_data_set_bool(settings, "restart_when_active", true);
+	obs_data_set_int(settings, "fps", fps_);
+	// Keeping the browser alive when the source is hidden avoids a full reload
+	// (and a CPU spike) every time the scene switches.
+	obs_data_set_bool(settings, "restart_when_active", false);
 	// Colour patches are applied through this property: no page reload, so the
 	// CEF browser is never torn down while the user edits fields.
 	obs_data_set_string(settings, "css", css_.c_str());

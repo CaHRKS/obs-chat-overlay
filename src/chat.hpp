@@ -111,6 +111,9 @@ struct Config {
 	std::string widget_dir;
 	// Use the viewer's Twitch colour for nicknames instead of the widget's own.
 	bool twitch_nick_colors = true;
+	// Frames per second the embedded browser renders at. Lower values save a lot
+	// of CPU on weak machines.
+	int widget_fps = 15;
 };
 
 // ---------------------------------------------------------------------------
