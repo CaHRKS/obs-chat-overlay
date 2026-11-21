@@ -501,13 +501,22 @@ std::string build_page(const std::string &html, const std::string &css, const st
 	page += fields.json.empty() ? std::string("{}") : fields.json;
 	page += ";var DATA=";
 	page += data_raw.empty() ? std::string("{}") : data_raw;
+	// Exposed for the pruning script below: the widget hardcodes its own limit
+	// (20) and ignores the messagesLimit field entirely.
+	page += ";window.__chatFields=FIELDS;";
 	// StreamElements session data always carries "id" (used to resolve the emote
 	// provider) and "channel"; the widget reads e.detail.data.id, so a missing id
 	// throws "Cannot read properties of undefined (reading 'id')".
 	page += ";if(!DATA.id)DATA.id='0';";
 	page += ";if(!DATA.channel)DATA.channel={id:DATA.id,username:'channel'};";
+	// Any other missing key would throw the same way and abort the widget's
+	// initialisation, so unknown keys return a small stand-in object.
+	page += "try{DATA=new Proxy(DATA,{get:function(t,k){if(typeof k==='symbol')return t[k];"
+		"if(k in t)return t[k];return{id:'0',channel:{id:'0',username:'channel'}};},"
+		"has:function(t,k){return k in t;}});}catch(e){}";
+	page += ";var CH={id:(DATA&&DATA.id)||'0',username:'channel'};";
 	page += ";function fire(){try{window.dispatchEvent(new CustomEvent('onWidgetLoad',{detail:{"
-		"fieldData:FIELDS,data:DATA}}));}catch(e){}}"
+		"fieldData:FIELDS,data:DATA,channel:CH}}));}catch(e){}}"
 		"if(document.readyState==='complete'){setTimeout(fire,150);}"
 		"else{window.addEventListener('load',function(){setTimeout(fire,150);});}"
 		"try{var es=new EventSource('/events');es.onmessage=function(e){try{var p=JSON.parse(e.data);"
@@ -519,6 +528,39 @@ std::string build_page(const std::string &html, const std::string &css, const st
 		"'payload emotes: '+ee.length+' '+JSON.stringify(ee[0]).slice(0,200));}}}catch(x){}"
 		"window.dispatchEvent(new CustomEvent('onEventReceived',{detail:p}));}catch(err){}};"
 		"}catch(err){}})();</script>";
+	// Emote fallback that does not depend on the widget's own provider logic: the
+	// widget only draws an <img> when provider === "twitch", and silently builds
+	// an unsized <div> otherwise. We know every emote of every message from the
+	// event payload, so replace the plain words in the rendered text ourselves.
+	page += "<script>(function(){var MAP={},done=0;"
+		"function collect(d){if(!d||!d.emotes)return;for(var i=0;i<d.emotes.length;i++){"
+		"var e=d.emotes[i];if(e&&e.name&&e.urls&&e.urls.length){"
+		"MAP[e.name]=e.urls[2]||e.urls[e.urls.length-1];}}}"
+		"function patch(el){if(!el||el.__emotesPatched)return;el.__emotesPatched=1;"
+		"var w=document.createTreeWalker(el,NodeFilter.SHOW_TEXT,null),nodes=[];"
+		"while(w.nextNode())nodes.push(w.currentNode);"
+		"for(var i=0;i<nodes.length;i++){var node=nodes[i],parts=node.nodeValue.split(/(\\s+)/),"
+		"changed=false,frag=document.createDocumentFragment();"
+		"for(var j=0;j<parts.length;j++){var t=parts[j];if(MAP[t]){var img=document.createElement('img');"
+		"img.className='emote';img.src=MAP[t];img.alt=t;frag.appendChild(img);changed=true;done++;}"
+		"else frag.appendChild(document.createTextNode(t));}"
+		"if(changed&&node.parentNode)node.parentNode.replaceChild(frag,node);}}"
+		"function patchRecent(){var list=document.querySelectorAll('.msg .message_text');"
+		"for(var i=Math.max(0,list.length-4);i<list.length;i++)patch(list[i]);}"
+		"window.addEventListener('onEventReceived',function(ev){try{"
+		"collect(ev.detail&&ev.detail.event&&ev.detail.event.data);setTimeout(patchRecent,40);"
+		"}catch(e){}});"
+		"window.__emoteFallback=function(){return done;};"
+		"})();</script>";
+	// Hard cap on the number of rows. The widget keeps up to 20 messages of its
+	// own accord and every row runs infinite CSS animations, which is what made
+	// the CPU usage creep up on long streams.
+	page += "<script>(function(){var LIMIT=parseInt((window.__chatFields&&window.__chatFields."
+		"messagesLimit)||15,10)||15;"
+		"function trim(){var list=document.querySelectorAll('.msg');"
+		"for(var i=0;i<list.length-LIMIT;i++){if(list[i].parentNode)list[i].parentNode.removeChild(list[i]);}}"
+		"window.addEventListener('onEventReceived',function(){setTimeout(trim,60);});"
+		"})();</script>";
 	page += "</body></html>";
 	return page;
 }
@@ -544,6 +586,13 @@ std::string build_css_override(const FieldValues &values)
 	css += ".flower,.divider,.divider_container,.cat,.eyes,.heart,.tilda{filter:drop-shadow(0 0 "
 	       "9.9px " +
 	       get("shadowelemcol") + ") !important;}";
+	// The fallback inserter uses plain <img> elements for emotes. The widget's own
+	// fallback path writes inline "height:auto" into a div, which overrides its
+	// stylesheet and leaves a zero-height element; !important restores the size.
+	css += ".emote{height:51px !important;min-height:51px !important;min-width:51px !important;"
+	       "background-size:contain !important;background-repeat:no-repeat !important;"
+	       "background-position:center !important;vertical-align:middle !important;"
+	       "object-fit:contain !important;margin-right:7px !important;}";
 	return css;
 }
 

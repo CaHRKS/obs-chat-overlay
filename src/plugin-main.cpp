@@ -27,6 +27,9 @@ OBS_MODULE_USE_DEFAULT_LOCALE("obs-chat-overlay", "en-US")
 namespace {
 
 constexpr const char *kSourceId = "obs_chat_overlay";
+// Keep in sync with buildspec.json; printed on load so the log always shows which
+// build is installed.
+constexpr const char *CHAT_OVERLAY_VERSION = "1.3.6";
 
 void chat_overlay_update(void *data, obs_data_t *settings);
 
@@ -1078,7 +1081,8 @@ bool obs_module_load(void)
 	info.enum_active_sources = chat_overlay_enum_active_sources;
 
 	obs_register_source(&info);
-	blog(LOG_INFO, "[chat-overlay] loaded, source id %s", kSourceId);
+	blog(LOG_INFO, "[chat-overlay] loaded, source id %s (version %s)", kSourceId,
+	     CHAT_OVERLAY_VERSION);
 	return true;
 }
 
