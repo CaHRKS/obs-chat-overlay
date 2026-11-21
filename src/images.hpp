@@ -41,6 +41,8 @@ public:
 	bool take(const std::string &key, DecodedImage &out);
 	// True when the key failed permanently (404, decode error, ...).
 	bool failed(const std::string &key) const;
+	// Logs failed downloads (useful when diagnosing emotes/badges).
+	void set_debug(bool enabled);
 
 	void stop();
 

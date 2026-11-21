@@ -8,6 +8,8 @@
 #include "images.hpp"
 #include "net.hpp"
 
+#include <obs-module.h>
+
 #include <windows.h>
 #include <objbase.h>
 #include <wincodec.h>
@@ -111,6 +113,7 @@ struct ImageCache::State {
 	std::map<std::string, DecodedImage> ready;
 	std::string proxy;
 	bool stopping = false;
+	std::atomic<bool> debug{false};
 	std::atomic<int> active{0};
 };
 
@@ -201,6 +204,11 @@ bool ImageCache::failed(const std::string &key) const
 	return it != state_->entries.end() && it->second.error;
 }
 
+void ImageCache::set_debug(bool enabled)
+{
+	state_->debug = enabled;
+}
+
 void ImageCache::worker_main(std::shared_ptr<State> state)
 {
 	state->active.fetch_add(1);
@@ -235,6 +243,11 @@ void ImageCache::worker_main(std::shared_ptr<State> state)
 		if (response.ok && !response.body.empty()) {
 			const std::vector<uint8_t> bytes(response.body.begin(), response.body.end());
 			ok = decode_image_bytes(bytes, image);
+		}
+
+		if (!ok && state->debug.load()) {
+			blog(LOG_WARNING, "[chat-overlay] image failed: %s (%s) status=%ld", key.c_str(),
+			     url.c_str(), response.status);
 		}
 
 		{

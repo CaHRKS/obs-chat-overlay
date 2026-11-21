@@ -373,6 +373,8 @@ void chat_overlay_update(void *data, obs_data_t *settings)
 		std::lock_guard<std::mutex> lock(ctx->mutex);
 		const Config previous = ctx->cfg;
 		ctx->cfg = cfg;
+		if (ctx->images)
+			ctx->images->set_debug(cfg.debug_log);
 
 		if (ctx->renderer)
 			ctx->renderer->configure(cfg);
@@ -392,6 +394,7 @@ void chat_overlay_update(void *data, obs_data_t *settings)
 			// The image cache owns its proxy configuration. Swapping it is
 			// enough: the renderer keeps its already decoded textures.
 			ctx->images = std::make_shared<ImageCache>(2, cfg.proxy);
+			ctx->images->set_debug(cfg.debug_log);
 			if (ctx->renderer)
 				ctx->renderer->set_images(ctx->images);
 			restart = true;
@@ -634,7 +637,7 @@ void config_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "hide_commands", true);
 	obs_data_set_default_string(settings, "command_prefix", "!");
 	obs_data_set_default_bool(settings, "hide_links", true);
-	obs_data_set_default_int(settings, "caps_threshold", 70);
+	obs_data_set_default_int(settings, "caps_threshold", 0);
 	obs_data_set_default_string(settings, "stopwords", "");
 	obs_data_set_default_string(settings, "ignore_users", "");
 

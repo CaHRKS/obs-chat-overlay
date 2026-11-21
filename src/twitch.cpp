@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <objbase.h>
+#include <string_view>
 #include <thread>
 #include <utility>
 
@@ -43,6 +44,21 @@ std::string twitch_emote_url(const std::string &id)
 	return "https://static-cdn.jtvnw.net/emoticons/v2/" + id + "/default/dark/2.0";
 }
 
+// Pulls the numeric channel id out of an IRC tag block ("...room-id=12345;...").
+std::string extract_room_id(std::string_view line)
+{
+	const size_t pos = line.find("room-id=");
+	if (pos == std::string_view::npos)
+		return std::string();
+	size_t begin = pos + 8;
+	size_t end = begin;
+	while (end < line.size() && line[end] >= '0' && line[end] <= '9')
+		++end;
+	if (end == begin)
+		return std::string();
+	return std::string(line.substr(begin, end - begin));
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -59,6 +75,7 @@ struct TwitchWorker::State {
 	mutable std::mutex mutex;
 	std::deque<ChatMessage> queue;
 	std::string status;
+	std::string room_id; // numeric channel id from the IRC "room-id" tag
 
 	std::atomic<bool> stop{false};
 	std::atomic<bool> done{false};
@@ -280,6 +297,16 @@ void TwitchWorker::read_loop(State &state)
 			if (line.empty())
 				continue;
 
+			// The numeric channel id comes for free in the IRC tags; it unlocks
+			// channel badges and channel emotes without any credentials.
+			if (line.find("room-id=") != std::string::npos) {
+				const std::string id = extract_room_id(line);
+				if (!id.empty() && room_id(state).empty()) {
+					set_room_id(state, id);
+					blog(LOG_INFO, "[chat-overlay] room-id from IRC: %s", id.c_str());
+				}
+			}
+
 			if (state.cfg.debug_log)
 				blog(LOG_INFO, "[chat-overlay] << %s", line.c_str());
 
@@ -342,9 +369,98 @@ std::string TwitchWorker::helix_get(State &state, const std::string &path)
 	return result.body;
 }
 
+void TwitchWorker::set_room_id(State &state, const std::string &id)
+{
+	std::lock_guard<std::mutex> lock(state.mutex);
+	if (state.room_id.empty())
+		state.room_id = id;
+}
+
+std::string TwitchWorker::room_id(State &state)
+{
+	std::lock_guard<std::mutex> lock(state.mutex);
+	return state.room_id;
+}
+
+void TwitchWorker::register_known_badges(State &state)
+{
+	// Global badges that do not depend on the channel. Used when the public
+	// badge API is unavailable and no Client-ID/OAuth is configured.
+	struct Known {
+		const char *key;
+		const char *uuid;
+	};
+	static const Known kKnown[] = {
+		{"moderator/1", "3267646d-33f0-4b17-b3df-f923a41db1d0"},
+		{"broadcaster/1", "5527c58c-fb7d-422d-b71b-f309dcb85cc1"},
+		{"vip/1", "b817aba4-fad8-49e2-b88a-7cc744dfa6ec"},
+		{"premium/1", "bbbe0db0-a598-423e-86d0-f9fb98ca1933"},
+		{"partner/1", "d12a2e27-16f6-41d0-ab77-b780518f00a3"},
+		{"staff/1", "d97c37bd-a6f5-4c38-8f57-4e4bef88af34"},
+	};
+
+	for (const Known &badge : kKnown) {
+		state.images->register_image(
+			"badge:" + std::string(badge.key),
+			"https://static-cdn.jtvnw.net/badges/v1/" + std::string(badge.uuid) + "/2");
+	}
+}
+
+// Reads badges from the legacy public endpoint, which needs no OAuth token.
+// Returns the number of registered badge versions.
+size_t TwitchWorker::load_badges_public(State &state, const std::string &room_id_value)
+{
+	size_t registered = 0;
+
+	const auto consume = [&state, &registered](const std::string &body) {
+		if (body.empty())
+			return;
+		json::Value root;
+		if (!json::parse(body, root))
+			return;
+		const json::Value *sets = root.find("badge_sets");
+		if (!sets || !sets->is_object())
+			return;
+		for (const auto &set : sets->object) {
+			const json::Value &versions = set.second["versions"];
+			for (const auto &version : versions.object) {
+				std::string url = version.second.get_string("image_url_2x");
+				if (url.empty())
+					url = version.second.get_string("image_url_1x");
+				if (url.empty())
+					continue;
+				state.images->register_image("badge:" + set.first + "/" + version.first, url);
+				++registered;
+			}
+		}
+	};
+
+	HttpResult global =
+		http_get("https://badges.twitch.tv/v1/badges/global/display?language=en", {},
+			 state.cfg.proxy);
+	if (global.ok)
+		consume(global.body);
+
+	if (!room_id_value.empty()) {
+		HttpResult channel = http_get("https://badges.twitch.tv/v1/badges/channels/" +
+						      room_id_value + "/display?language=en",
+					      {}, state.cfg.proxy);
+		if (channel.ok)
+			consume(channel.body);
+	}
+
+	return registered;
+}
+
 void TwitchWorker::load_metadata(State &state)
 {
-	std::string broadcaster_id;
+	// The numeric channel id arrives in the IRC "room-id" tag right after JOIN.
+	// It is enough to fetch channel badges and channel BTTV/7TV emotes without
+	// any Client-ID/OAuth.
+	for (int i = 0; i < 100 && room_id(state).empty() && !state.stop.load(); ++i)
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+	std::string id = room_id(state);
 	const bool has_credentials =
 		!state.cfg.client_id.empty() && !strip_oauth(state.cfg.oauth).empty();
 
@@ -354,20 +470,33 @@ void TwitchWorker::load_metadata(State &state)
 		json::Value root;
 		if (!body.empty() && json::parse(body, root) && root["data"].is_array() &&
 		    root["data"].size() > 0) {
-			broadcaster_id = root["data"].at(0).get_string("id");
+			const std::string resolved = root["data"].at(0).get_string("id");
+			if (!resolved.empty())
+				id = resolved;
 		}
-		if (!broadcaster_id.empty())
-			blog(LOG_INFO, "[chat-overlay] channel id %s", broadcaster_id.c_str());
-		else
-			blog(LOG_WARNING,
-			     "[chat-overlay] cannot resolve channel id (check Client-ID/OAuth)");
-	} else if (!state.cfg.channel.empty()) {
-		blog(LOG_INFO,
-		     "[chat-overlay] no Client-ID/OAuth: badges and channel emotes are disabled");
 	}
 
-	load_badges(state, broadcaster_id);
-	load_emotes(state, broadcaster_id);
+	if (id.empty())
+		blog(LOG_WARNING,
+		     "[chat-overlay] channel id is unknown: channel badges and channel emotes may be missing");
+	else
+		blog(LOG_INFO, "[chat-overlay] channel id %s", id.c_str());
+
+	register_known_badges(state);
+
+	const size_t public_badges = load_badges_public(state, id);
+	if (public_badges > 0) {
+		blog(LOG_INFO, "[chat-overlay] badges from public API: %zu", public_badges);
+	} else if (has_credentials) {
+		blog(LOG_INFO, "[chat-overlay] public badge API unavailable, falling back to Helix");
+		load_badges(state, id);
+	} else {
+		blog(LOG_WARNING,
+		     "[chat-overlay] public badge API unavailable: only built-in global badges "
+		     "(mod/vip/prime/partner/staff) will be shown. Add Client-ID/OAuth for all badges.");
+	}
+
+	load_emotes(state, id);
 }
 
 void TwitchWorker::load_badges(State &state, const std::string &broadcaster_id)

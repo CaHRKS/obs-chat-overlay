@@ -45,8 +45,12 @@ private:
 	static bool connect_irc(State &state, std::string &error);
 	static void read_loop(State &state);
 	static void load_metadata(State &state);
+	static size_t load_badges_public(State &state, const std::string &room_id);
+	static void register_known_badges(State &state);
 	static void load_badges(State &state, const std::string &broadcaster_id);
 	static void load_emotes(State &state, const std::string &broadcaster_id);
+	static void set_room_id(State &state, const std::string &id);
+	static std::string room_id(State &state);
 	static void register_twitch_emotes(State &state, const ChatMessage &msg);
 	static std::string helix_get(State &state, const std::string &path);
 	static void push(State &state, ChatMessage msg);

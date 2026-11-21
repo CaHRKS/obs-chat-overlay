@@ -206,6 +206,28 @@ IrcKind parse_irc_line(const std::string &line, ChatMessage &msg, std::string &p
 		msg.text = msg.text.substr(action_prefix.size());
 		if (!msg.text.empty() && msg.text.back() == '\x01')
 			msg.text.pop_back();
+
+		// Twitch usually reports emote ranges against the raw text including
+		// the "\x01ACTION " wrapper. Detect that case (a range pointing past the
+		// stripped text) and shift the ranges; otherwise leave them untouched.
+		if (!msg.emotes.empty()) {
+			const size_t stripped_cp = utf8_length(msg.text);
+			const bool includes_prefix = std::any_of(
+				msg.emotes.begin(), msg.emotes.end(),
+				[stripped_cp](const EmoteSpan &span) { return span.end_cp >= stripped_cp; });
+			if (includes_prefix) {
+				const uint32_t shift = (uint32_t)action_prefix.size();
+				std::vector<EmoteSpan> shifted;
+				shifted.reserve(msg.emotes.size());
+				for (const EmoteSpan &span : msg.emotes) {
+					if (span.start_cp < shift || span.end_cp < span.start_cp)
+						continue;
+					shifted.push_back({span.start_cp - shift, span.end_cp - shift,
+							   span.id});
+				}
+				msg.emotes.swap(shifted);
+			}
+		}
 	}
 
 	return IrcKind::Privmsg;
