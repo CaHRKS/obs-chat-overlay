@@ -490,6 +490,17 @@ void chat_overlay_tick(void *data, float seconds)
 
 	std::lock_guard<std::mutex> lock(ctx->mutex);
 
+	if (ctx->widget && ctx->widget->active()) {
+		ctx->widget->tick(seconds);
+		if (ctx->widget->failed()) {
+			blog(LOG_WARNING,
+			     "[chat-overlay] widget is not responding, switching back to the native "
+			     "renderer");
+			ctx->widget->stop();
+			ctx->widget.reset();
+		}
+	}
+
 	const bool widget_active = ctx->widget && ctx->widget->active();
 
 	if (ctx->cfg.demo_mode) {

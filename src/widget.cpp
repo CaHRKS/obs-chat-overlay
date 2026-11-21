@@ -376,6 +376,34 @@ bool WidgetHost::rebuild(std::string *error)
 	return true;
 }
 
+void WidgetHost::tick(float seconds)
+{
+	if (!source_)
+		return;
+
+	// obs-browser creates its CEF browser inside the source's Tick() callback.
+	// A nested source that is only rendered by us never receives OBS ticks, so
+	// they are forwarded explicitly.
+	obs_source_video_tick(source_, seconds);
+
+	const double now = monotonic_seconds();
+	if (started_at_ == 0.0)
+		started_at_ = now;
+
+	if (!warned_ && server_.client_count() == 0 && now - started_at_ > 8.0) {
+		warned_ = true;
+		blog(LOG_WARNING,
+		     "[chat-overlay] widget page did not connect to %s: the embedded browser "
+		     "did not open the page (obs-browser/CEF issue?)",
+		     url_.c_str());
+	}
+}
+
+bool WidgetHost::failed() const
+{
+	return warned_ && server_.client_count() == 0;
+}
+
 void WidgetHost::poll()
 {
 	if (!source_)

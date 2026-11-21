@@ -27,6 +27,11 @@ public:
 	void set_size(uint32_t width, uint32_t height);
 	// Rebuilds the page when the widget files changed on disk.
 	void poll();
+	// Drives the embedded browser source: obs-browser creates the CEF browser
+	// inside its own Tick(), and a nested source is not ticked by OBS itself.
+	void tick(float seconds);
+	// True when the page never connected to the local server (black screen).
+	bool failed() const;
 	void feed(const ChatMessage &msg, const std::string &channel, const Config &cfg);
 	void render();
 	int viewers() const;
@@ -44,4 +49,6 @@ private:
 	uint32_t height_ = 0;
 	int last_viewers_ = -1;
 	double next_poll_ = 0.0;
+	double started_at_ = 0.0;
+	bool warned_ = false;
 };
