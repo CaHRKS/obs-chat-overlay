@@ -1,5 +1,7 @@
 #include <obs-module.h>
 
+#include <graphics/vec4.h>
+
 #include "chat.hpp"
 #include "images.hpp"
 #include "render.hpp"
@@ -37,6 +39,7 @@ Config config_from_settings(obs_data_t *settings)
 	cfg.use_tls = obs_data_get_bool(settings, "use_tls");
 	cfg.proxy = trim(obs_data_get_string(settings, "proxy"));
 	cfg.debug_log = obs_data_get_bool(settings, "debug_log");
+	cfg.demo_mode = obs_data_get_bool(settings, "demo_mode");
 
 	cfg.width = (uint32_t)obs_data_get_int(settings, "width");
 	cfg.height = (uint32_t)obs_data_get_int(settings, "height");
@@ -116,6 +119,10 @@ struct ChatOverlay {
 	std::string applied_theme_file;
 	std::string applied_theme_preset;
 	size_t applied_css_hash = 0;
+
+	// Demo mode state (graphics thread only).
+	size_t demo_index = 0;
+	double next_demo_time = 0.0;
 };
 
 void destroy_texture(ChatOverlay *ctx)
@@ -130,9 +137,87 @@ void destroy_texture(ChatOverlay *ctx)
 	ctx->texture_h = 0;
 }
 
+// Builds one of the local test messages used by demo mode. The text is ASCII
+// where emote ranges are involved, so code point offsets equal character offsets.
+ChatMessage make_demo_message(size_t index)
+{
+	ChatMessage msg;
+	msg.user = "testviewer";
+	msg.display = "TestViewer";
+	msg.color = "#FF7F50";
+
+	const auto add_emote = [&msg](const char *id, uint32_t start, uint32_t end) {
+		EmoteSpan span;
+		span.id = id;
+		span.start_cp = start;
+		span.end_cp = end;
+		msg.emotes.push_back(span);
+	};
+
+	switch (index % 8) {
+	case 0:
+		msg.text = "Проверка чата: обычное сообщение, ник окрашен в цвет Twitch.";
+		break;
+	case 1:
+		msg.display = "EmoteFan";
+		msg.user = "emotefan";
+		msg.color = "#1E90FF";
+		msg.text = "Kappa PogChamp LUL 4Head BibleThump";
+		add_emote("25", 0, 4);        // Kappa
+		add_emote("88", 6, 13);       // PogChamp
+		add_emote("425618", 15, 17);  // LUL
+		add_emote("354", 19, 23);     // 4Head
+		add_emote("86", 25, 34);      // BibleThump
+		break;
+	case 2:
+		msg.display = "LongMessage";
+		msg.user = "longmessage";
+		msg.text = "Длинное сообщение для проверки переноса строк: плагин должен "
+			   "разбить его по словам и не выпустить за пределы блока чата даже "
+			   "при маленькой ширине панели.";
+		break;
+	case 3:
+		msg.display = "Moderator";
+		msg.user = "moderator";
+		msg.color = "#00FF7F";
+		msg.badges.push_back({"moderator", "1"});
+		msg.badges.push_back({"premium", "1"});
+		msg.text = "Сообщение с бейджами модератора и Prime.";
+		break;
+	case 4:
+		msg.display = "ActionUser";
+		msg.user = "actionuser";
+		msg.color = "#FF69B4";
+		msg.action = true;
+		msg.text = "танцует и машет всем в чате";
+		break;
+	case 5:
+		msg.display = "ChatBot";
+		msg.user = "chatbot";
+		msg.text = "!команда — это сообщение должно быть скрыто модерацией команд";
+		break;
+	case 6:
+		msg.display = "CapsUser";
+		msg.user = "capsuser";
+		msg.text = "ЭТО СООБЩЕНИЕ НАПИСАНО КАПСОМ И ДОЛЖНО БЫТЬ СКРЫТО";
+		break;
+	default:
+		msg.display = "LinkUser";
+		msg.user = "linkuser";
+		msg.text = "смотрите стрим на https://example.com (должно быть скрыто)";
+		break;
+	}
+
+	return msg;
+}
+
 // Must be called with ctx->mutex held.
 void start_worker_locked(ChatOverlay *ctx)
 {
+	if (ctx->cfg.demo_mode) {
+		// Demo mode renders local test messages; no network connection is needed.
+		return;
+	}
 	blog(LOG_INFO, "[chat-overlay] starting worker for #%s",
 	     ctx->cfg.channel.empty() ? "<none>" : ctx->cfg.channel.c_str());
 	ctx->worker.reset(new TwitchWorker(ctx->cfg, ctx->emotes, ctx->images));
@@ -301,6 +386,7 @@ void chat_overlay_update(void *data, obs_data_t *settings)
 		const bool emote_sources_changed = cfg.twitch_emotes != previous.twitch_emotes ||
 						   cfg.bttv_emotes != previous.bttv_emotes ||
 						   cfg.seventv_emotes != previous.seventv_emotes;
+		const bool demo_changed = cfg.demo_mode != previous.demo_mode;
 
 		if (proxy_changed) {
 			// The image cache owns its proxy configuration. Swapping it is
@@ -313,6 +399,26 @@ void chat_overlay_update(void *data, obs_data_t *settings)
 
 		if (connection_changed || emote_sources_changed)
 			restart = true;
+
+		if (demo_changed) {
+			restart = true;
+			blog(LOG_INFO, "[chat-overlay] demo mode %s",
+			     cfg.demo_mode ? "enabled: local test messages, no network"
+					   : "disabled: back to the live channel");
+			if (cfg.demo_mode) {
+				if (ctx->renderer)
+					ctx->renderer->clear();
+				ctx->demo_index = 0;
+				ctx->next_demo_time = 0.0;
+				// Badge images for the demo messages (global Twitch badges).
+				ctx->images->register_image(
+					"badge:moderator/1",
+					"https://static-cdn.jtvnw.net/badges/v1/3267646d-33f0-4b17-b3df-f923a41db1d0/2");
+				ctx->images->register_image(
+					"badge:premium/1",
+					"https://static-cdn.jtvnw.net/badges/v1/bbbe0db0-a598-423e-86d0-f9fb98ca1933/2");
+			}
+		}
 
 		if (restart)
 			previous_worker = std::move(ctx->worker);
@@ -339,7 +445,17 @@ void chat_overlay_tick(void *data, float seconds)
 	const double now = monotonic_seconds();
 
 	std::lock_guard<std::mutex> lock(ctx->mutex);
-	if (ctx->worker) {
+
+	if (ctx->cfg.demo_mode) {
+		if (now >= ctx->next_demo_time) {
+			ctx->next_demo_time = now + 1.5;
+			ChatMessage msg = make_demo_message(ctx->demo_index++);
+			msg.seq = ctx->demo_index;
+			msg.recv_time = now;
+			if (moderation_allows(ctx->cfg, msg))
+				ctx->renderer->add(msg);
+		}
+	} else if (ctx->worker) {
 		std::vector<ChatMessage> incoming;
 		ctx->worker->drain(incoming, 128);
 		for (ChatMessage &msg : incoming) {
@@ -350,6 +466,34 @@ void chat_overlay_tick(void *data, float seconds)
 	}
 
 	ctx->renderer->tick(now);
+}
+
+// Draws the prepared panel texture. Because the source uses
+// OBS_SOURCE_CUSTOM_DRAW, OBS passes a NULL effect and does not bind any, so the
+// effect loop is set up here (obs_source_draw() would fail with
+// "no active effect").
+void draw_panel_texture(ChatOverlay *ctx)
+{
+	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+	if (!effect)
+		return;
+
+	gs_eparam_t *image = gs_effect_get_param_by_name(effect, "image");
+	if (image)
+		gs_effect_set_texture(image, ctx->texture);
+
+	gs_eparam_t *color = gs_effect_get_param_by_name(effect, "color");
+	if (color) {
+		struct vec4 white;
+		vec4_set(&white, 1.0f, 1.0f, 1.0f, 1.0f);
+		gs_effect_set_vec4(color, &white);
+	}
+
+	gs_matrix_push();
+	gs_matrix_translate3f((float)ctx->draw_x, (float)ctx->draw_y, 0.0f);
+	while (gs_effect_loop(effect, "Draw"))
+		gs_draw_sprite(ctx->texture, 0, ctx->texture_w, ctx->texture_h);
+	gs_matrix_pop();
 }
 
 void chat_overlay_render(void *data, gs_effect_t *effect)
@@ -378,26 +522,26 @@ void chat_overlay_render(void *data, gs_effect_t *effect)
 				   ctx->texture_h != (uint32_t)panel.height;
 
 	if (rebuilt || size_mismatch) {
+		// video_render() already runs inside the graphics context, so textures
+		// are created and uploaded directly without obs_enter_graphics().
 		if (size_mismatch) {
-			destroy_texture(ctx);
-			obs_enter_graphics();
+			if (ctx->texture) {
+				gs_texture_destroy(ctx->texture);
+				ctx->texture = nullptr;
+			}
 			ctx->texture = gs_texture_create((uint32_t)panel.width, (uint32_t)panel.height,
 							 GS_RGBA, 1, nullptr, GS_DYNAMIC);
-			obs_leave_graphics();
 			ctx->texture_w = (uint32_t)panel.width;
 			ctx->texture_h = (uint32_t)panel.height;
 		}
 		if (ctx->texture) {
-			obs_enter_graphics();
 			gs_texture_set_image(ctx->texture, panel.rgba.data(),
 					     (uint32_t)panel.width * 4, false);
-			obs_leave_graphics();
 		}
 	}
 
 	if (ctx->texture)
-		obs_source_draw(ctx->texture, ctx->draw_x, ctx->draw_y, ctx->texture_w,
-				ctx->texture_h, false);
+		draw_panel_texture(ctx);
 }
 
 uint32_t chat_overlay_width(void *data)
@@ -501,6 +645,8 @@ void config_defaults(obs_data_t *settings)
 	obs_data_set_default_string(settings, "theme_preset", "none");
 	obs_data_set_default_string(settings, "theme_file", "");
 	obs_data_set_default_string(settings, "theme_css", "");
+
+	obs_data_set_default_bool(settings, "demo_mode", false);
 }
 
 obs_properties_t *chat_overlay_properties(void *data)
@@ -558,6 +704,19 @@ obs_properties_t *chat_overlay_properties(void *data)
 		"Подробности в docs/THEMES.md.",
 		OBS_TEXT_INFO);
 	obs_properties_add_group(props, "theme_group", "Тема и импорт", OBS_GROUP_NORMAL, theme);
+
+	obs_properties_t *diagnostics = obs_properties_create();
+	obs_properties_add_bool(diagnostics, "demo_mode",
+				"Демо-режим: тестовые сообщения без сети");
+	obs_properties_add_text(
+		diagnostics, "diag_help",
+		"Демо-режим каждые 1,5 секунды добавляет тестовые сообщения: обычный текст, "
+		"смайлы Twitch, длинную строку для проверки переноса, бейджи, /me и три "
+		"сообщения, которые должна скрыть модерация. Сеть не используется — "
+		"удобно проверять оформление, когда канал оффлайн.",
+		OBS_TEXT_INFO);
+	obs_properties_add_group(props, "diag_group", "Диагностика", OBS_GROUP_NORMAL,
+				 diagnostics);
 
 	obs_properties_t *layout = obs_properties_create();
 	obs_properties_add_int(layout, "width", "Ширина источника", 320, 7680, 1);

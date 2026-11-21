@@ -41,7 +41,7 @@ private:
 	struct State;
 
 	static void thread_main(std::shared_ptr<State> state);
-	static void run(State &state);
+	static void run(std::shared_ptr<State> state);
 	static bool connect_irc(State &state, std::string &error);
 	static void read_loop(State &state);
 	static void load_metadata(State &state);
