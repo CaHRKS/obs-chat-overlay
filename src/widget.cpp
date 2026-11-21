@@ -476,7 +476,7 @@ std::string build_page(const std::string &html, const std::string &css, const st
 		"try{var of=window.fetch;if(of){var nf=0;window.fetch=function(u,o){var url=("
 		"typeof u==='string')?u:((u&&u.url)||'');"
 		// The widget asks StreamElements for the emote provider
-		// (fetch('…/kappa/v2/channels/'+detail.data.channel.id+'/').then(j=>provider=j.provider)).
+		// (fetch('…/kappa/v2/channels/'+data.id+'/').then(j=>provider=j.provider)).
 		// Without that answer emotes take a slow fallback path, so answer locally.
 		"if(url.indexOf('api.streamelements.com')>=0){"
 		"return Promise.resolve(new Response(JSON.stringify({provider:'twitch'}),"
@@ -501,9 +501,11 @@ std::string build_page(const std::string &html, const std::string &css, const st
 	page += fields.json.empty() ? std::string("{}") : fields.json;
 	page += ";var DATA=";
 	page += data_raw.empty() ? std::string("{}") : data_raw;
-	// StreamElements always passes session data with a channel object; the widget
-	// reads detail.data.channel.id when resolving the emote provider.
-	page += ";if(!DATA.channel)DATA.channel={id:'0',username:'channel'};";
+	// StreamElements session data always carries "id" (used to resolve the emote
+	// provider) and "channel"; the widget reads e.detail.data.id, so a missing id
+	// throws "Cannot read properties of undefined (reading 'id')".
+	page += ";if(!DATA.id)DATA.id='0';";
+	page += ";if(!DATA.channel)DATA.channel={id:DATA.id,username:'channel'};";
 	page += ";function fire(){try{window.dispatchEvent(new CustomEvent('onWidgetLoad',{detail:{"
 		"fieldData:FIELDS,data:DATA}}));}catch(e){}}"
 		"if(document.readyState==='complete'){setTimeout(fire,150);}"
@@ -512,9 +514,9 @@ std::string build_page(const std::string &html, const std::string &css, const st
 		// Diagnostics: show what the page actually receives, the widget needs
 		// emotes[i].urls[2] and silently draws nothing when it is missing.
 		"try{if(window.__emoteLogs===undefined)window.__emoteLogs=0;"
-		"if(window.__emoteLogs<3){var dd=p&&p.event&&p.event.data;var ee=dd&&dd.emotes;"
-		"window.__emoteLogs++;if(window.__chatLog)window.__chatLog('payload emotes: '+"
-		"(ee?ee.length:'none')+' '+(ee&&ee[0]?JSON.stringify(ee[0]).slice(0,180):''));}}catch(x){}"
+		"if(window.__emoteLogs<5){var dd=p&&p.event&&p.event.data;var ee=dd&&dd.emotes;"
+		"if(ee&&ee.length){window.__emoteLogs++;if(window.__chatLog)window.__chatLog("
+		"'payload emotes: '+ee.length+' '+JSON.stringify(ee[0]).slice(0,200));}}}catch(x){}"
 		"window.dispatchEvent(new CustomEvent('onEventReceived',{detail:p}));}catch(err){}};"
 		"}catch(err){}})();</script>";
 	page += "</body></html>";
