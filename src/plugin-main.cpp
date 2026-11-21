@@ -29,7 +29,7 @@ namespace {
 constexpr const char *kSourceId = "obs_chat_overlay";
 // Keep in sync with buildspec.json; printed on load so the log always shows which
 // build is installed.
-constexpr const char *CHAT_OVERLAY_VERSION = "1.3.6";
+constexpr const char *CHAT_OVERLAY_VERSION = "1.4.0";
 
 void chat_overlay_update(void *data, obs_data_t *settings);
 
@@ -146,6 +146,7 @@ struct ChatOverlay {
 	double widget_arm_time = 0.0;
 	bool started_once = false;
 	bool crash_warned = false;
+	std::string reported_invalid_channel;
 	std::map<std::string, std::string> pending_overrides;
 };
 
@@ -236,14 +237,39 @@ ChatMessage make_demo_message(size_t index)
 }
 
 // Must be called with ctx->mutex held.
+// OBS applies a text property on every keystroke, so intermediate values like
+// "c", "ш" or "<none>" reach update(). Only real Twitch logins are worth a
+// connection attempt: 2..25 chars of [a-z0-9_].
+bool channel_is_valid(const std::string &channel)
+{
+	if (channel.size() < 2 || channel.size() > 25)
+		return false;
+	for (const char c : channel) {
+		const bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
+		if (!ok)
+			return false;
+	}
+	return true;
+}
+
 void start_worker_locked(ChatOverlay *ctx)
 {
 	if (ctx->cfg.demo_mode) {
 		// Demo mode renders local test messages; no network connection is needed.
 		return;
 	}
-	blog(LOG_INFO, "[chat-overlay] starting worker for #%s",
-	     ctx->cfg.channel.empty() ? "<none>" : ctx->cfg.channel.c_str());
+	if (!channel_is_valid(ctx->cfg.channel)) {
+		if (ctx->reported_invalid_channel != ctx->cfg.channel) {
+			ctx->reported_invalid_channel = ctx->cfg.channel;
+			blog(LOG_INFO,
+			     "[chat-overlay] channel \"%s\" is not a valid Twitch login yet, "
+			     "waiting for the full name",
+			     ctx->cfg.channel.empty() ? "<none>" : ctx->cfg.channel.c_str());
+		}
+		return;
+	}
+	ctx->reported_invalid_channel.clear();
+	blog(LOG_INFO, "[chat-overlay] starting worker for #%s", ctx->cfg.channel.c_str());
 	ctx->worker.reset(new TwitchWorker(ctx->cfg, ctx->emotes, ctx->images));
 	ctx->worker->start();
 }

@@ -6,7 +6,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <objbase.h>
+#include <sstream>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -62,6 +66,131 @@ std::string extract_room_id(std::string_view line)
 } // namespace
 
 // ---------------------------------------------------------------------------
+// Emote cache: keeps the BTTV/7TV sets on disk so emotes are available right
+// after OBS starts, before (or even without) any network round-trip.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::string emote_cache_dir()
+{
+	const char *appdata = std::getenv("APPDATA");
+	std::string base = (appdata && *appdata) ? appdata : ".";
+	base += "\\obs-studio\\plugin_config\\obs-chat-overlay";
+	return base;
+}
+
+std::string emote_cache_path(const std::string &login)
+{
+	std::string safe;
+	for (const char c : to_lower_ascii(login)) {
+		const bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
+		if (ok)
+			safe.push_back(c);
+	}
+	if (safe.empty())
+		safe = "default";
+	return emote_cache_dir() + "\\emotes-" + safe + ".json";
+}
+
+std::string emote_url_for_key(const std::string &key)
+{
+	if (key.rfind("7tv:", 0) == 0)
+		return "https://cdn.7tv.app/emote/" + key.substr(4) + "/2x.png";
+	if (key.rfind("bttv:", 0) == 0)
+		return "https://cdn.betterttv.net/emote/" + key.substr(5) + "/2x";
+	return std::string();
+}
+
+std::string cache_escape(const std::string &text)
+{
+	std::string out;
+	out.reserve(text.size() + 8);
+	for (const char c : text) {
+		if (c == '"' || c == '\\')
+			out.push_back('\\');
+		if (c == '\n' || c == '\r')
+			out.push_back(' ');
+		else
+			out.push_back(c);
+	}
+	return out;
+}
+
+bool load_emote_cache(const std::string &login, std::string &cached_id,
+		      std::vector<EmoteEntry> &global, std::vector<EmoteEntry> &channel)
+{
+	std::ifstream file(emote_cache_path(login), std::ios::binary);
+	if (!file)
+		return false;
+
+	std::ostringstream buffer;
+	buffer << file.rdbuf();
+
+	json::Value root;
+	if (!json::parse(buffer.str(), root) || !root.is_object())
+		return false;
+
+	cached_id = root.get_string("id");
+	const auto add = [](const json::Value &items, std::vector<EmoteEntry> &out) {
+		for (size_t i = 0; i < items.size(); ++i) {
+			const std::string name = items.at(i).get_string("n");
+			const std::string source = items.at(i).get_string("s");
+			const std::string id = items.at(i).get_string("i");
+			if (name.empty() || id.empty())
+				continue;
+			out.push_back({name, source + ":" + id});
+		}
+	};
+	add(root["global"], global);
+	add(root["channel"], channel);
+	return !global.empty() || !channel.empty();
+}
+
+void save_emote_cache(const std::string &login, const std::string &channel_id,
+		      const std::vector<EmoteEntry> &global,
+		      const std::vector<EmoteEntry> &channel)
+{
+	std::error_code ec;
+	std::filesystem::create_directories(emote_cache_dir(), ec);
+	if (ec)
+		return;
+
+	const auto append = [](std::string &out, const std::vector<EmoteEntry> &items) {
+		out += "[";
+		bool first = true;
+		for (const EmoteEntry &entry : items) {
+			const size_t colon = entry.key.find(':');
+			if (colon == std::string::npos)
+				continue;
+			const std::string source = entry.key.substr(0, colon);
+			const std::string id = entry.key.substr(colon + 1);
+			if (source != "7tv" && source != "bttv")
+				continue;
+			if (!first)
+				out += ",";
+			first = false;
+			out += "{\"n\":\"" + cache_escape(entry.name) + "\",\"s\":\"" + source +
+			       "\",\"i\":\"" + cache_escape(id) + "\"}";
+		}
+		out += "]";
+	};
+
+	std::string body = "{\"login\":\"" + cache_escape(login) + "\",\"id\":\"" +
+			   cache_escape(channel_id) + "\",\"global\":";
+	append(body, global);
+	body += ",\"channel\":";
+	append(body, channel);
+	body += "}";
+
+	std::ofstream out(emote_cache_path(login), std::ios::binary | std::ios::trunc);
+	if (out)
+		out << body;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
 // Shared state: everything the network thread touches lives here, so the thread
 // may safely outlive the TwitchWorker instance.
 // ---------------------------------------------------------------------------
@@ -85,6 +214,67 @@ struct TwitchWorker::State {
 	// Only touched by the network thread.
 	bool first_message_logged = false;
 };
+
+void TwitchWorker::apply_cached_emotes(State &state)
+{
+	std::string cached_id;
+	std::vector<EmoteEntry> global_entries;
+	std::vector<EmoteEntry> channel_entries;
+	if (!load_emote_cache(state.cfg.channel, cached_id, global_entries, channel_entries))
+		return;
+
+	if (state.images) {
+		for (const EmoteEntry &entry : global_entries) {
+			const std::string url = emote_url_for_key(entry.key);
+			if (!url.empty())
+				state.images->register_image(entry.key, url);
+		}
+		for (const EmoteEntry &entry : channel_entries) {
+			const std::string url = emote_url_for_key(entry.key);
+			if (!url.empty())
+				state.images->register_image(entry.key, url);
+		}
+	}
+
+	if (state.emotes) {
+		state.emotes->set_global(std::move(global_entries));
+		state.emotes->set_channel(std::move(channel_entries));
+	}
+	if (!cached_id.empty() && room_id(state).empty())
+		set_room_id(state, cached_id);
+
+	blog(LOG_INFO, "[chat-overlay] emotes restored from cache for #%s (channel id %s)",
+	     state.cfg.channel.c_str(), cached_id.empty() ? "unknown" : cached_id.c_str());
+}
+
+std::string TwitchWorker::resolve_channel_id_public(State &state)
+{
+	const std::string login = to_lower_ascii(state.cfg.channel);
+	if (login.empty())
+		return std::string();
+
+	// ivr.fi mirrors Twitch without requiring Client-ID/OAuth, so the channel id
+	// is available even when the IRC "room-id" tag never arrives.
+	const HttpResult user = http_get(
+		"https://api.ivr.fi/v2/twitch/user?login=" + url_encode(login), {},
+		state.cfg.proxy);
+	if (!user.ok)
+		return std::string();
+
+	json::Value root;
+	if (!json::parse(user.body, root))
+		return std::string();
+
+	std::string id;
+	if (root.is_array() && root.size() > 0)
+		id = root.at(0).get_string("id");
+	else if (root.is_object())
+		id = root.get_string("id");
+
+	if (!id.empty())
+		blog(LOG_INFO, "[chat-overlay] channel id %s resolved by login", id.c_str());
+	return id;
+}
 
 TwitchWorker::TwitchWorker(const Config &cfg, std::shared_ptr<EmoteRegistry> emotes,
 			   std::shared_ptr<ImageCache> images)
@@ -501,6 +691,10 @@ size_t TwitchWorker::load_badges_ivr(State &state)
 
 void TwitchWorker::load_metadata(State &state)
 {
+	// Restore the cached BTTV/7TV sets first: emotes then work immediately, even
+	// while the network requests below are still running (or fail).
+	apply_cached_emotes(state);
+
 	// The numeric channel id arrives in the IRC "room-id" tag right after JOIN.
 	// It is enough to fetch channel badges and channel BTTV/7TV emotes without
 	// any Client-ID/OAuth.
@@ -522,6 +716,12 @@ void TwitchWorker::load_metadata(State &state)
 				id = resolved;
 		}
 	}
+
+	// No credentials and no IRC tag: ask the public mirror by login.
+	if (id.empty())
+		id = resolve_channel_id_public(state);
+	if (!id.empty())
+		set_room_id(state, id);
 
 	if (id.empty())
 		blog(LOG_WARNING,
@@ -701,8 +901,34 @@ void TwitchWorker::load_emotes(State &state, const std::string &broadcaster_id)
 	if (state.stop.load())
 		return;
 
+	// If the channel API returned nothing (network hiccup, unknown id), keep the
+	// channel set from the cache instead of losing it.
+	if (channel_entries.empty() && !broadcaster_id.empty()) {
+		std::string cached_id;
+		std::vector<EmoteEntry> cached_global;
+		std::vector<EmoteEntry> cached_channel;
+		if (load_emote_cache(state.cfg.channel, cached_id, cached_global, cached_channel) &&
+		    !cached_channel.empty()) {
+			if (state.images) {
+				for (const EmoteEntry &entry : cached_channel) {
+					const std::string url = emote_url_for_key(entry.key);
+					if (!url.empty())
+						state.images->register_image(entry.key, url);
+				}
+			}
+			channel_entries = std::move(cached_channel);
+			blog(LOG_INFO, "[chat-overlay] channel emotes kept from cache: %zu",
+			     channel_entries.size());
+		}
+	}
+
 	const size_t global_count = global_entries.size();
 	const size_t channel_count = channel_entries.size();
+
+	// Remember the fresh sets for the next start. Only overwrite when the network
+	// really returned something, otherwise a transient failure would wipe the cache.
+	if (global_count > 0)
+		save_emote_cache(state.cfg.channel, broadcaster_id, global_entries, channel_entries);
 
 	state.emotes->set_global(std::move(global_entries));
 	state.emotes->set_channel(std::move(channel_entries));
