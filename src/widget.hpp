@@ -24,6 +24,13 @@ struct WidgetFieldInfo {
 
 std::vector<WidgetFieldInfo> widget_fields(const std::string &dir);
 
+// Crash-loop protection: a marker file is written while a browser source exists
+// and removed on a clean shutdown. If OBS is killed while the widget is active,
+// the marker survives and the next start skips the embedded browser.
+bool widget_crash_suspected();
+void widget_mark_active();
+void widget_mark_clean();
+
 // Runs a StreamElements-style widget (HTML + CSS + JS + fields + data) inside an
 // embedded OBS browser source. The plugin serves the assembled page from a local
 // HTTP server and pushes chat events in the StreamElements format, so widgets

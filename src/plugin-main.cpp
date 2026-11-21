@@ -130,6 +130,15 @@ struct ChatOverlay {
 	// Demo mode state (graphics thread only).
 	size_t demo_index = 0;
 	double next_demo_time = 0.0;
+
+	// Widget start is deferred: creating (and especially destroying) a browser
+	// source before CEF finished initialising crashes libcef, which is why the
+	// embedded browser is only started after OBS has been running for a while.
+	bool widget_wanted = false;
+	double widget_arm_time = 0.0;
+	bool started_once = false;
+	bool crash_warned = false;
+	std::map<std::string, std::string> pending_overrides;
 };
 
 void destroy_texture(ChatOverlay *ctx)
@@ -400,11 +409,16 @@ void chat_overlay_destroy(void *data)
 	{
 		std::lock_guard<std::mutex> lock(ctx->mutex);
 		worker = std::move(ctx->worker);
-		ctx->widget.reset();
+		if (ctx->widget) {
+			ctx->widget->stop();
+			ctx->widget.reset();
+		}
 		ctx->renderer.reset();
 	}
 	if (worker)
 		worker->stop();
+	// Clean shutdown: the next OBS start may create the browser source again.
+	widget_mark_clean();
 
 	destroy_texture(ctx);
 	ctx->images.reset();
@@ -498,28 +512,45 @@ void chat_overlay_update(void *data, obs_data_t *settings)
 						 cfg.widget_dir != previous.widget_dir;
 		const bool widget_size_changed = cfg.width != previous.width ||
 						 cfg.height != previous.height;
+		const bool widget_enabled = cfg.widget_mode && !cfg.widget_dir.empty();
+		const bool user_enabled = cfg.widget_mode && !previous.widget_mode && ctx->started_once;
+		ctx->pending_overrides = overrides;
 
-		if (widget_mode_changed) {
+		if (!widget_enabled) {
 			if (ctx->widget) {
 				ctx->widget->stop();
 				ctx->widget.reset();
+				widget_mark_clean();
 			}
-			if (cfg.widget_mode) {
-				std::string error;
-				auto host = std::make_unique<WidgetHost>();
-				if (host->start(ctx->source, cfg.widget_dir, ctx->emotes.get(),
-						ctx->images.get(), overrides, cfg.width, cfg.height,
-						&error)) {
-					ctx->widget = std::move(host);
-					blog(LOG_INFO, "[chat-overlay] widget mode enabled: %s",
-					     cfg.widget_dir.c_str());
-				} else {
+			ctx->widget_wanted = false;
+		} else if (!ctx->widget_wanted) {
+			// Schedule the start; chat_overlay_tick() creates the browser source
+			// once CEF has had time to initialise.
+			if (widget_crash_suspected() && !user_enabled) {
+				if (!ctx->crash_warned) {
+					ctx->crash_warned = true;
 					blog(LOG_WARNING,
-					     "[chat-overlay] widget mode unavailable, using the native "
-					     "renderer: %s",
-					     error.c_str());
+					     "[chat-overlay] OBS seems to have crashed with the widget "
+					     "running; automatic start is skipped. Turn 'widget mode' "
+					     "off and on again to retry.");
 				}
+			} else {
+				widget_mark_clean();
+				ctx->widget_wanted = true;
+				ctx->widget_arm_time = monotonic_seconds() + 4.0;
+				blog(LOG_INFO, "[chat-overlay] widget scheduled in 4 s: %s",
+				     cfg.widget_dir.c_str());
 			}
+		} else if (widget_mode_changed) {
+			// The widget folder changed while running: restart with the new one.
+			if (ctx->widget) {
+				ctx->widget->stop();
+				ctx->widget.reset();
+				widget_mark_clean();
+			}
+			ctx->widget_arm_time = monotonic_seconds() + 4.0;
+			blog(LOG_INFO, "[chat-overlay] widget folder changed, restarting in 4 s: %s",
+			     cfg.widget_dir.c_str());
 		} else if (ctx->widget) {
 			// Size changes only resize the browser; field edits only patch CSS.
 			// Both avoid re-creating the CEF browser (which could crash it).
@@ -554,6 +585,26 @@ void chat_overlay_tick(void *data, float seconds)
 
 	std::lock_guard<std::mutex> lock(ctx->mutex);
 
+	// Deferred widget start: the browser source is created only after OBS and CEF
+	// have settled, never during scene loading (that path crashed libcef).
+	if (ctx->widget_wanted && !ctx->widget && now >= ctx->widget_arm_time) {
+		std::string error;
+		auto host = std::make_unique<WidgetHost>();
+		if (host->start(ctx->source, ctx->cfg.widget_dir, ctx->emotes.get(),
+				ctx->images.get(), ctx->pending_overrides, ctx->cfg.width,
+				ctx->cfg.height, &error)) {
+			ctx->widget = std::move(host);
+			widget_mark_active();
+			blog(LOG_INFO, "[chat-overlay] widget mode enabled: %s",
+			     ctx->cfg.widget_dir.c_str());
+		} else {
+			ctx->widget_wanted = false;
+			blog(LOG_WARNING,
+			     "[chat-overlay] widget mode unavailable, using the native renderer: %s",
+			     error.c_str());
+		}
+	}
+
 	const bool widget_active = ctx->widget && ctx->widget->active();
 	if (widget_active)
 		ctx->widget->tick(seconds);
@@ -587,6 +638,10 @@ void chat_overlay_tick(void *data, float seconds)
 	ctx->renderer->tick(now);
 	if (widget_active)
 		ctx->widget->poll();
+
+	// From now on settings changes are user actions, so an explicit "widget mode"
+	// toggle is allowed to retry after a crash.
+	ctx->started_once = true;
 }
 
 // Draws the prepared panel texture. Because the source uses

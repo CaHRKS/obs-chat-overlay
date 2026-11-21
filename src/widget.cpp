@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -482,9 +483,42 @@ std::string build_css_override(const FieldValues &values)
 
 } // namespace
 
-std::vector<WidgetFieldInfo> widget_fields(const std::string &dir)
+namespace {
+
+std::string widget_lock_path()
 {
-	std::vector<WidgetFieldInfo> result;
+	const char *temp = std::getenv("TEMP");
+	const std::string base = (temp && *temp) ? temp : ".";
+	return base + "\\obs-chat-overlay-widget.lock";
+}
+
+} // namespace
+
+bool widget_crash_suspected()
+{
+	std::FILE *file = std::fopen(widget_lock_path().c_str(), "rb");
+	if (!file)
+		return false;
+	std::fclose(file);
+	return true;
+}
+
+void widget_mark_active()
+{
+	std::FILE *file = std::fopen(widget_lock_path().c_str(), "wb");
+	if (!file)
+		return;
+	std::fputs("active", file);
+	std::fclose(file);
+}
+
+void widget_mark_clean()
+{
+	std::remove(widget_lock_path().c_str());
+}
+
+std::vector<WidgetFieldInfo> widget_fields(const std::string &dir)
+{	std::vector<WidgetFieldInfo> result;
 	if (dir.empty())
 		return result;
 
