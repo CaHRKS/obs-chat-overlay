@@ -683,12 +683,14 @@ bool WidgetHost::rebuild(std::string *error)
 
 	// Log the colour values that actually went into the CSS, so the on-screen
 	// result can be compared with the properties dialog.
+	const FieldValues resolved =
+		collect_fields(fields, data.empty() ? "{}" : data, overrides_);
 	static const char *kColorKeys[] = {"namecol", "textmesscol",   "backgroundcol",
 					   "shadownamecol", "shadowtextcol", "shadowelemcol",
 					   "flowercol", "dividercol"};
 	for (const char *key : kColorKeys) {
-		const auto it = fields.values.find(key);
-		if (it != fields.values.end())
+		const auto it = resolved.values.find(key);
+		if (it != resolved.values.end())
 			blog(LOG_INFO, "[chat-overlay] widget field %s = %s", key,
 			     it->second.c_str());
 	}
