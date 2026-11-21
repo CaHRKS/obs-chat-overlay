@@ -456,6 +456,30 @@ std::string build_page(const std::string &html, const std::string &css, const st
 	return page;
 }
 
+// CSS patched into the browser source through its "css" setting. Applying field
+// edits this way avoids reloading (and re-creating) the CEF browser, which used
+// to crash on rapid property changes.
+std::string build_css_override(const FieldValues &values)
+{
+	const auto get = [&values](const char *key) {
+		const auto it = values.values.find(key);
+		return it != values.values.end() ? it->second : std::string();
+	};
+
+	std::string css;
+	css += ".name{color:" + get("namecol") + " !important;text-shadow:0 0 9.9px " +
+	       get("shadownamecol") + " !important;}";
+	css += ".message_text{color:" + get("textmesscol") +
+	       " !important;text-shadow:0 0 4.4px " + get("shadowtextcol") + " !important;}";
+	css += ".message{background:" + get("backgroundcol") + " !important;}";
+	css += ".flower path:nth-of-type(1){fill:" + get("flowercol") + " !important;}";
+	css += ".divider path:nth-of-type(1){fill:" + get("dividercol") + " !important;}";
+	css += ".flower,.divider,.divider_container,.cat,.eyes,.heart,.tilda{filter:drop-shadow(0 0 "
+	       "9.9px " +
+	       get("shadowelemcol") + ") !important;}";
+	return css;
+}
+
 } // namespace
 
 std::vector<WidgetFieldInfo> widget_fields(const std::string &dir)
@@ -605,8 +629,19 @@ void WidgetHost::set_overrides(const std::map<std::string, std::string> &overrid
 	if (overrides == overrides_)
 		return;
 	overrides_ = overrides;
-	if (source_)
-		rebuild(nullptr);
+	if (!source_)
+		return;
+
+	// Patch the colours through the browser source's CSS property instead of
+	// rebuilding the page: reloading (or re-creating) the browser on every field
+	// edit can crash CEF.
+	const std::string fields = read_first(dir_, {"fields.txt", "fields.json"});
+	const std::string data = read_first(dir_, {"data.txt", "data.json"});
+	const FieldValues resolved =
+		collect_fields(fields, data.empty() ? "{}" : data, overrides_);
+	css_ = build_css_override(resolved);
+	apply_size();
+	blog(LOG_INFO, "[chat-overlay] widget fields updated (%zu overrides)", overrides_.size());
 }
 
 void WidgetHost::set_size(uint32_t width, uint32_t height)
@@ -630,6 +665,9 @@ void WidgetHost::apply_size()
 	obs_data_set_int(settings, "height", (long long)height_);
 	obs_data_set_int(settings, "fps", 30);
 	obs_data_set_bool(settings, "restart_when_active", true);
+	// Colour patches are applied through this property: no page reload, so the
+	// CEF browser is never torn down while the user edits fields.
+	obs_data_set_string(settings, "css", css_.c_str());
 
 	if (!source_) {
 		// Unique name: OBS keeps the previous browser source alive until its CEF
@@ -668,6 +706,9 @@ bool WidgetHost::rebuild(std::string *error)
 
 	const std::string page =
 		build_page(html, css, js, fields, data.empty() ? "{}" : data, overrides_);
+	const FieldValues resolved =
+		collect_fields(fields, data.empty() ? "{}" : data, overrides_);
+	css_ = build_css_override(resolved);
 	server_.set_page(page);
 	stamp_ = directory_stamp(dir_);
 	// The URL must change on every rebuild, otherwise obs_source_update() keeps
@@ -683,8 +724,6 @@ bool WidgetHost::rebuild(std::string *error)
 
 	// Log the colour values that actually went into the CSS, so the on-screen
 	// result can be compared with the properties dialog.
-	const FieldValues resolved =
-		collect_fields(fields, data.empty() ? "{}" : data, overrides_);
 	static const char *kColorKeys[] = {"namecol", "textmesscol",   "backgroundcol",
 					   "shadownamecol", "shadowtextcol", "shadowelemcol",
 					   "flowercol", "dividercol"};

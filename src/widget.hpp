@@ -80,4 +80,5 @@ private:
 	bool warned_ = false;
 	std::deque<std::string> backlog_; // events sent before the page connected
 	std::map<std::string, std::string> overrides_; // field values edited in OBS
+	std::string css_; // colour overrides injected through the browser source
 };

@@ -494,11 +494,12 @@ void chat_overlay_update(void *data, obs_data_t *settings)
 			}
 		}
 
-		const bool widget_changed = cfg.widget_mode != previous.widget_mode ||
-					    cfg.widget_dir != previous.widget_dir ||
-					    cfg.width != previous.width || cfg.height != previous.height;
+		const bool widget_mode_changed = cfg.widget_mode != previous.widget_mode ||
+						 cfg.widget_dir != previous.widget_dir;
+		const bool widget_size_changed = cfg.width != previous.width ||
+						 cfg.height != previous.height;
 
-		if (widget_changed) {
+		if (widget_mode_changed) {
 			if (ctx->widget) {
 				ctx->widget->stop();
 				ctx->widget.reset();
@@ -520,7 +521,10 @@ void chat_overlay_update(void *data, obs_data_t *settings)
 				}
 			}
 		} else if (ctx->widget) {
-			// Field values edited in the dialog: reload the page if anything changed.
+			// Size changes only resize the browser; field edits only patch CSS.
+			// Both avoid re-creating the CEF browser (which could crash it).
+			if (widget_size_changed)
+				ctx->widget->set_size(cfg.width, cfg.height);
 			ctx->widget->set_overrides(overrides);
 		}
 
