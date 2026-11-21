@@ -7,6 +7,7 @@
 #include <string>
 
 struct obs_source;
+class ImageCache;
 
 // Runs a StreamElements-style widget (HTML + CSS + JS + fields + data) inside an
 // embedded OBS browser source. The plugin serves the assembled page from a local
