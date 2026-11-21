@@ -164,6 +164,14 @@ void HttpServer::accept_loop()
 				break;
 			continue;
 		}
+
+		// Browsers open speculative connections that never send a request. Without
+		// a timeout the accept loop would block in recv() forever and the server
+		// would stop answering real requests.
+		DWORD timeout = 1500;
+		setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof(timeout));
+		setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout, sizeof(timeout));
+
 		handle_connection((unsigned long long)client);
 	}
 }
@@ -182,6 +190,12 @@ void HttpServer::handle_connection(unsigned long long handle)
 		request.append(buffer, (size_t)received);
 		if (request.find("\r\n") != std::string::npos)
 			break;
+	}
+
+	if (request.empty()) {
+		// Speculative connection or a client that hung up: nothing to answer.
+		close_socket(handle);
+		return;
 	}
 
 	const size_t line_end = request.find("\r\n");

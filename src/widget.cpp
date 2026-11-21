@@ -538,7 +538,12 @@ void WidgetHost::apply_size()
 	obs_data_set_bool(settings, "restart_when_active", true);
 
 	if (!source_) {
-		source_ = obs_source_create("browser_source", "chat-overlay-widget", settings, nullptr);
+		// Unique name: OBS keeps the previous browser source alive until its CEF
+		// teardown completes, and reusing the name triggers a rename warning.
+		static int instance = 0;
+		const std::string name = "chat-overlay-widget-" + std::to_string(++instance);
+		source_ =
+			obs_source_create("browser_source", name.c_str(), settings, nullptr);
 		if (source_) {
 			obs_source_inc_showing(source_);
 			// Registers the browser as an active child of our source: OBS then
