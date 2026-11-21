@@ -265,10 +265,12 @@ WidgetHost::~WidgetHost()
 	stop();
 }
 
-bool WidgetHost::start(const std::string &dir, uint32_t width, uint32_t height, std::string *error)
+bool WidgetHost::start(obs_source *parent, const std::string &dir, uint32_t width, uint32_t height,
+		       std::string *error)
 {
 	stop();
 
+	parent_ = parent;
 	dir_ = dir;
 	width_ = width;
 	height_ = height;
@@ -307,11 +309,13 @@ bool WidgetHost::start(const std::string &dir, uint32_t width, uint32_t height, 
 void WidgetHost::stop()
 {
 	if (source_) {
+		if (parent_)
+			obs_source_remove_active_child(parent_, source_);
 		obs_source_dec_showing(source_);
-		obs_source_dec_active(source_);
 		obs_source_release(source_);
 		source_ = nullptr;
 	}
+	parent_ = nullptr;
 	server_.stop();
 	last_viewers_ = -1;
 }
@@ -342,12 +346,20 @@ void WidgetHost::apply_size()
 		source_ = obs_source_create("browser_source", "chat-overlay-widget", settings, nullptr);
 		if (source_) {
 			obs_source_inc_showing(source_);
-			obs_source_inc_active(source_);
+			// Registers the browser as an active child of our source: OBS then
+			// activates it together with the parent, which is what makes
+			// obs-browser create and tick its CEF browser.
+			if (parent_)
+				obs_source_add_active_child(parent_, source_);
 		}
 	} else {
 		obs_source_update(source_, settings);
 	}
 	obs_data_release(settings);
+
+	if (source_)
+		blog(LOG_INFO, "[chat-overlay] browser source ready: id=%s size=%ux%u",
+		     obs_source_get_id(source_), width_, height_);
 }
 
 bool WidgetHost::rebuild(std::string *error)
@@ -381,11 +393,7 @@ void WidgetHost::tick(float seconds)
 	if (!source_)
 		return;
 
-	// obs-browser creates its CEF browser inside the source's Tick() callback.
-	// A nested source that is only rendered by us never receives OBS ticks, so
-	// they are forwarded explicitly.
-	obs_source_video_tick(source_, seconds);
-
+	(void)seconds;
 	const double now = monotonic_seconds();
 	if (started_at_ == 0.0)
 		started_at_ = now;
