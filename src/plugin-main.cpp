@@ -23,7 +23,7 @@ namespace {
 
 constexpr const char *kSourceId = "obs_chat_overlay";
 
-bool chat_overlay_update(void *data, obs_data_t *settings);
+void chat_overlay_update(void *data, obs_data_t *settings);
 
 Config config_from_settings(obs_data_t *settings)
 {
@@ -272,11 +272,11 @@ void chat_overlay_destroy(void *data)
 	delete ctx;
 }
 
-bool chat_overlay_update(void *data, obs_data_t *settings)
+void chat_overlay_update(void *data, obs_data_t *settings)
 {
 	auto *ctx = (ChatOverlay *)data;
 	if (!ctx)
-		return false;
+		return;
 
 	Config cfg = config_from_settings(settings);
 	apply_pending_theme(ctx, settings, cfg);
@@ -327,7 +327,6 @@ bool chat_overlay_update(void *data, obs_data_t *settings)
 		std::lock_guard<std::mutex> lock(ctx->mutex);
 		start_worker_locked(ctx);
 	}
-	return true;
 }
 
 void chat_overlay_tick(void *data, float seconds)
