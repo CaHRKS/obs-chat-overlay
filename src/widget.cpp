@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <vector>
 
@@ -147,40 +148,119 @@ std::string seventv_emote_url(const std::string &id, int size)
 	return "https://cdn.7tv.app/emote/" + id + "/" + std::to_string(size) + "x.png";
 }
 
-// Re-emits the "value" members of a StreamElements fields definition so that the
-// widget receives them as fieldData.
-std::string field_values(const std::string &fields_json)
-{
-	json::Value root;
-	if (fields_json.empty() || !json::parse(fields_json, root) || !root.is_object())
-		return "{}";
+// StreamElements replaces {fieldName} placeholders inside HTML, CSS and JS with
+// the current field values. Without this step colours such as
+// "color: {textmesscol};" are invalid CSS and the widget loses its design.
+struct FieldValues {
+	std::map<std::string, std::string> values;
+	std::string json;
+};
 
-	std::string out = "{";
-	bool first = true;
-	for (const auto &field : root.object) {
-		const json::Value *value = field.second.find("value");
-		if (!value)
-			continue;
-		if (!first)
-			out += ",";
-		first = false;
-		out += "\"" + json_escape(field.first) + "\":";
-		switch (value->type) {
-		case json::Value::Type::String:
-			out += "\"" + json_escape(value->string) + "\"";
-			break;
-		case json::Value::Type::Number:
-			out += std::to_string(value->number);
-			break;
-		case json::Value::Type::Bool:
-			out += value->boolean ? "true" : "false";
-			break;
-		default:
-			out += "null";
-			break;
+std::string value_to_string(const json::Value &value)
+{
+	switch (value.type) {
+	case json::Value::Type::String:
+		return value.string;
+	case json::Value::Type::Number: {
+		char buffer[64];
+		snprintf(buffer, sizeof(buffer), "%g", value.number);
+		return buffer;
+	}
+	case json::Value::Type::Bool:
+		return value.boolean ? "true" : "false";
+	default:
+		return std::string();
+	}
+}
+
+FieldValues collect_fields(const std::string &fields_json, const std::string &data_json)
+{
+	FieldValues result;
+
+	// data.txt holds the values saved by the StreamElements editor, and they are
+	// exactly what the widget's CSS placeholders refer to.
+	json::Value data;
+	if (!data_json.empty() && json::parse(data_json, data) && data.is_object()) {
+		for (const auto &item : data.object)
+			result.values[item.first] = value_to_string(item.second);
+	}
+
+	json::Value fields;
+	if (!fields_json.empty() && json::parse(fields_json, fields) && fields.is_object()) {
+		for (const auto &field : fields.object) {
+			const json::Value *type_value = field.second.find("type");
+			const std::string type = type_value ? type_value->string : std::string();
+
+			if (const json::Value *value = field.second.find("value")) {
+				result.values[field.first] = value_to_string(*value);
+				continue;
+			}
+			if (type == "button" || type == "hidden")
+				continue;
+			if (result.values.count(field.first))
+				continue;
+
+			if (type == "colorpicker") {
+				result.values[field.first] = "#ffffff";
+			} else if (type == "checkbox") {
+				result.values[field.first] = "false";
+			} else if (type == "dropdown") {
+				const json::Value *options = field.second.find("options");
+				if (options && options->is_object() && !options->object.empty())
+					result.values[field.first] = options->object.front().first;
+			} else if (type == "number") {
+				result.values[field.first] = "0";
+			} else if (type == "text") {
+				result.values[field.first] = "";
+			}
 		}
 	}
-	out += "}";
+
+	result.json = "{";
+	bool first = true;
+	for (const auto &item : result.values) {
+		if (!first)
+			result.json += ",";
+		first = false;
+		result.json += "\"" + json_escape(item.first) + "\":";
+		// Numbers and booleans stay unquoted so the widget receives real types.
+		const std::string &value = item.second;
+		const bool numeric = !value.empty() &&
+				     value.find_first_not_of("0123456789.-") == std::string::npos;
+		if (numeric || value == "true" || value == "false")
+			result.json += value;
+		else
+			result.json += "\"" + json_escape(value) + "\"";
+	}
+	result.json += "}";
+	return result;
+}
+
+std::string substitute_fields(const std::string &text, const std::map<std::string, std::string> &values)
+{
+	std::string out;
+	out.reserve(text.size());
+
+	for (size_t i = 0; i < text.size(); ++i) {
+		if (text[i] != '{') {
+			out.push_back(text[i]);
+			continue;
+		}
+		const size_t close = text.find('}', i + 1);
+		if (close == std::string::npos) {
+			out.push_back(text[i]);
+			continue;
+		}
+		const std::string key = text.substr(i + 1, close - i - 1);
+		const auto it = values.find(key);
+		if (it == values.end()) {
+			out.append(text, i, close - i + 1);
+			i = close;
+			continue;
+		}
+		out += it->second;
+		i = close;
+	}
 	return out;
 }
 
@@ -281,10 +361,18 @@ std::string build_message_event(const ChatMessage &msg, const std::string &chann
 }
 
 std::string build_page(const std::string &html, const std::string &css, const std::string &js,
-		       const std::string &fields_json, const std::string &data_json)
+		       const std::string &fields_raw, const std::string &data_raw)
 {
+	// StreamElements substitutes {field} placeholders in HTML/CSS/JS before the
+	// widget runs; the same has to happen here, otherwise colours written as
+	// "color: {textmesscol}" would be dropped by the CSS parser.
+	const FieldValues fields = collect_fields(fields_raw, data_raw);
+	const std::string page_html = substitute_fields(html, fields.values);
+	const std::string page_css = substitute_fields(css, fields.values);
+	const std::string page_js = substitute_fields(js, fields.values);
+
 	std::string page;
-	page.reserve(html.size() + css.size() + js.size() + 4096);
+	page.reserve(page_html.size() + page_css.size() + page_js.size() + 8192);
 
 	page += "<!DOCTYPE html><html><head><meta charset=\"utf-8\">";
 	page += "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">";
@@ -294,9 +382,30 @@ std::string build_page(const std::string &html, const std::string &css, const st
 	page += "<link rel=\"stylesheet\" "
 		"href=\"https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css\">";
 	page += "<style>";
-	page += css;
-	page += "</style></head><body>";
-	page += html;
+	page += page_css;
+	page += "</style>";
+	// Local fallback for animate.css: the widget hangs "animate__fadeIn" /
+	// "animate__fadeOut" classes on messages, and the CDN may be unreachable.
+	page += "<style>"
+		".animate__animated{animation-duration:var(--animate-duration,1s);"
+		"animation-fill-mode:both;}"
+		"@keyframes fadeIn{from{opacity:0}to{opacity:1}}"
+		"@keyframes fadeOut{from{opacity:1}to{opacity:0}}"
+		"@keyframes fadeInUp{from{opacity:0;transform:translate3d(0,20%,0)}"
+		"to{opacity:1;transform:none}}"
+		"@keyframes fadeOutDown{from{opacity:1}to{opacity:0;transform:translate3d(0,20%,0)}}"
+		"@keyframes zoomIn{from{opacity:0;transform:scale3d(.7,.7,.7)}"
+		"to{opacity:1;transform:scale3d(1,1,1)}}"
+		"@keyframes bounceIn{from{opacity:0;transform:scale3d(.9,.9,.9)}"
+		"60%{opacity:1;transform:scale3d(1.05,1.05,1.05)}to{transform:none}}"
+		".animate__fadeIn{animation-name:fadeIn}"
+		".animate__fadeOut{animation-name:fadeOut}"
+		".animate__fadeInUp{animation-name:fadeInUp}"
+		".animate__fadeOutDown{animation-name:fadeOutDown}"
+		".animate__zoomIn{animation-name:zoomIn}"
+		".animate__bounceIn{animation-name:bounceIn}"
+		"</style></head><body>";
+	page += page_html;
 	page += "<script>";
 	// Report page errors and console output to the plugin log: the embedded
 	// browser has no visible devtools, and this is the only way to diagnose
@@ -318,11 +427,11 @@ std::string build_page(const std::string &html, const std::string &css, const st
 		"Promise.resolve(0);},set:function(){return Promise.resolve();}},sanitize:function(h){return "
 		"h;},resumeQueue:function(){},setField:function(){},console:console};";
 	page += "</script><script>";
-	page += js;
+	page += page_js;
 	page += "</script><script>(function(){var FIELDS=";
-	page += fields_json.empty() ? std::string("{}") : fields_json;
+	page += fields.json.empty() ? std::string("{}") : fields.json;
 	page += ";var DATA=";
-	page += data_json.empty() ? std::string("{}") : data_json;
+	page += data_raw.empty() ? std::string("{}") : data_raw;
 	page += ";function fire(){try{window.dispatchEvent(new CustomEvent('onWidgetLoad',{detail:{"
 		"fieldData:FIELDS,data:DATA}}));}catch(e){}}"
 		"if(document.readyState==='complete'){setTimeout(fire,150);}"
@@ -457,7 +566,8 @@ bool WidgetHost::rebuild(std::string *error)
 		return false;
 	}
 
-	const std::string page = build_page(html, css, js, field_values(fields), data.empty() ? "{}" : data);
+	const std::string page =
+		build_page(html, css, js, fields, data.empty() ? "{}" : data);
 	server_.set_page(page);
 	stamp_ = directory_stamp(dir_);
 	url_ = "http://127.0.0.1:" + std::to_string(server_.port()) + "/?v=" +
